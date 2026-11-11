@@ -1,0 +1,12 @@
+Sony USB protocol implementation references libgphoto2 camlibs/ptp2:
+https://github.com/gphoto/libgphoto2
+Reference commit: 26a57b27caeb865a6b1d415aa5a80b47837c9023
+Files: library.c, ptp.c, ptp.h, ptp-pack.c, config.c.
+Copyright: libgphoto2 contributors, including Marcus Meissner and the Sony
+PTP contributors credited in those files. Source file headers specify
+LGPL-2.0-or-later; the project's COPYING provides the LGPL-2.1 text bundled here.
+
+SpektraLab's Kotlin implementation adapts protocol constants, handshake order,
+model USB identifiers, property parsing and the documented safe photo-read
+condition. It does not link the libgphoto2 binary. The application is provided
+under GPL-3.0-or-later; the LGPL text is retained here with reference attribution.
