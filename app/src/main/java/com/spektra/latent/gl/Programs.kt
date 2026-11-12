@@ -304,6 +304,61 @@ void main() {
     fun previewFragment(context: Context): String = VERSION + FILM_HOST + shared(context) + PREVIEW_MAIN
     fun exposureFragment(context: Context): String = VERSION + FILM_HOST + shared(context) + EXPOSURE_MAIN
     fun cameraFragment(context: Context): String = VERSION + EXTERNAL + FILM_HOST + shared(context) + CAMERA_MAIN
+
+    // The complete film/print/scan conversion is already in the recording LUT.
+    // Finishing is kept after it so vignette can still use image coordinates.
+    private const val VIDEO_MAIN = """
+uniform sampler3D u_video_lut;
+uniform float u_video_lut_n;
+uniform samplerExternalOES u_camera;
+uniform Finish u_finish;
+in vec2 v_uv;
+in vec2 v_cam;
+out vec4 o_color;
+void main() {
+    vec3 encoded = texture(u_camera, v_cam).rgb;
+    vec3 linear = lut3(u_video_lut, u_video_lut_n, encoded);
+    o_color = vec4(lt_srgb3(finish_all(linear, v_uv * 2.0 - 1.0, u_finish)), 1.0);
+}
+"""
+
+    fun videoFragment(context: Context): String = VERSION + EXTERNAL + FILM_HOST + shared(context) + VIDEO_MAIN
+
+    // Auto metering changes a uniform, never the cube. Grade precedes metering
+    // just as in develop(); manual camera EV remains inside the exact baker.
+    private const val PREVIEW_CAMERA_MAIN = """
+uniform sampler3D u_preview_lut;
+uniform float u_preview_lut_n;
+uniform float u_preview_scale;
+uniform float u_preview_log_range;
+uniform float u_preview_ev;
+uniform samplerExternalOES u_camera;
+uniform Grade u_grade;
+uniform Finish u_finish;
+in vec2 v_uv;
+in vec2 v_cam;
+out vec4 o_color;
+void main() {
+    vec3 encoded = clamp(texture(u_camera, v_cam).rgb, 0.0, 1.0);
+    vec3 linear = grade_scene(lt_linear3(encoded), u_grade) * exp2(u_preview_ev);
+    vec3 shaped = log2(vec3(1.0) + max(linear, vec3(0.0)) * u_preview_scale) / u_preview_log_range;
+    vec3 result = lut3(u_preview_lut, u_preview_lut_n, shaped);
+    o_color = vec4(lt_srgb3(finish_all(result, v_uv * 2.0 - 1.0, u_finish)), 1.0);
+}
+"""
+
+    fun previewCameraFragment(context: Context): String =
+        VERSION + EXTERNAL + FILM_HOST + shared(context) + PREVIEW_CAMERA_MAIN
+
+    /** Encoded camera values for first-frame display and the independent meter. */
+    const val CAMERA_PASSTHROUGH = """#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision highp float;
+uniform samplerExternalOES u_camera;
+in vec2 v_cam;
+out vec4 o_color;
+void main() { o_color = vec4(texture(u_camera, v_cam).rgb, 1.0); }
+"""
 }
 
 /** A unit quad in attribute 0. GL thread only. */

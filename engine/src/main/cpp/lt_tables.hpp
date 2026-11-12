@@ -1,10 +1,8 @@
 // lt_tables.hpp -- the film model as tables a fragment shader can read.
 //
-// The engine (spektra_engine.cpp) computes a picture stage by stage; three of
-// those stages are, per pixel, nothing but table lookups. bake_tables() takes
-// those tables out of the engine itself, for the film / paper / filters the
-// caller asks for, so that the GPU preview (shaders/latent.glsl) and the
-// finished print on the CPU are drawn from the same numbers.
+// Legacy table extraction for regression and compatibility. Android photos
+// never instantiate these tables. Recording uses the separate complete cube
+// in lt_video.hpp, sampled from the exact engine rather than these components.
 //
 // The tables fall into three groups that change for different reasons; each
 // has a version that moves only when its content does, so the caller uploads
@@ -77,7 +75,7 @@ bool bake_tables(const spk::RenderParams& params, FilmTables& tables, std::strin
 
 // The centre-weighted metering of spektrafilm's auto exposure, in EV: the gain
 // 2^ev brings the picture's weighted mean luminance to mid grey.
-double meter_ev(const float* rgb, int w, int h);
+double meter_ev(const float* rgb, int w, int h, const std::string& method = "center_weighted");
 
 // The enlarger's neutral filter pack comes from the profile database, per film
 // and paper. For a pair the database does not cover (CineStill 800T on any

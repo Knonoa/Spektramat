@@ -3,6 +3,8 @@ package com.spektra.latent.data
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.ColorSpace
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -28,7 +30,8 @@ class Printed(val uri: Uri, val width: Int, val height: Int, val shown: Bitmap)
 /**
  * Makes the finished print of a frame: the original is read again at the
  * ordered size, corrected with the look's grade, sent through the full engine,
- * and saved as a JPEG in the phone's gallery.
+ * and saved in the phone's gallery. sRGB encoded prints use JPEG; wide-gamut
+ * and linear prints keep their float samples and ICC in TIFF.
  *
  * The stages reported while it works are real ones:
  * 0 reading the original, 1 film exposed, 2 film developed, 3 printed,
@@ -44,34 +47,39 @@ object Printer {
         frame: Frame,
         look: Look,
         longEdge: Int,
+        format: PrintFormat = PrintFormat.AUTO,
         onStage: (Int) -> Unit,
     ): Printed = withContext(Dispatchers.IO) {
         onStage(0)
         val edge = if (longEdge >= look.frameSize(frame.width, frame.height).max()) 0 else longEdge
         val shooting = if (look.edge.on || look.date.on) Shooting.of(frame) else null
+        val outputModel = look.model
         val print: Bitmap = Decoder.decode(frame.file, edge, look.lensShading, look.aspect).use { original ->
             // the engine's grain and halation are sized on the film: the same frame, whatever the print's size
             FilmEngine.develop(
-                original, look.grade(frame.meteredEv),
-                look.order(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number),
+                original, look.photoGrade(),
+                look.order(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number)
+                    .copy(model = outputModel),
                 look.finish(), look.finishTable(),
                 object : StageListener {
                     override fun onStage(stage: Int) = onStage(stage)
                 },
+                highPrecision = format == PrintFormat.FLOAT_TIFF,
             )
         }
         try {
-            val name = fileName(frame, look)
-            val uri = save(context, print, name)
-            copyExif(context, frame.file, uri)
+            val floating = format != PrintFormat.JPEG && print.config == Bitmap.Config.RGBA_F16
+            val name = fileName(frame, look, floating)
+            val uri = save(context, print, name, outputModel, floating)
+            // ExifInterface does not support rewriting this float TIFF.
+            if (!floating) copyExif(context, frame.file, uri)
             library.addPrint(frame.id, uri.toString(), print.width, print.height, look.film)
             onStage(STAGES)
             val k = min1(1600f / max(print.width, print.height))
-            val shown = if (k < 1f) {
-                Bitmap.createScaledBitmap(print, (print.width * k).roundToInt(), (print.height * k).roundToInt(), true)
-            } else {
-                print.copy(Bitmap.Config.ARGB_8888, false)
-            }
+            val shown = Bitmap.createBitmap(max(1, (print.width * k).roundToInt()),
+                max(1, (print.height * k).roundToInt()), Bitmap.Config.ARGB_8888)
+            Canvas(shown).drawBitmap(print, null, android.graphics.Rect(0, 0, shown.width, shown.height),
+                android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
             Printed(uri, print.width, print.height, shown)
         } finally {
             print.recycle()
@@ -82,19 +90,36 @@ object Printer {
 
     private fun min1(v: Float) = if (v < 1f) v else 1f
 
-    private fun fileName(frame: Frame, look: Look): String {
+    private fun fileName(frame: Frame, look: Look, floating: Boolean): String {
         val base = frame.name.substringBeforeLast('.').ifBlank { "frame-${frame.number}" }
         val film = look.film.substringAfter('_').replace('_', '-')
         val stamp = (System.currentTimeMillis() / 1000 % 100000).toString().padStart(5, '0')
-        return "${base}_${film}_$stamp.jpg".replace(Regex("[^\\w.\\-\\u4e00-\\u9fff]"), "_")
+        val extension = if (floating) "tif" else "jpg"
+        return "${base}_${film}_$stamp.$extension".replace(Regex("[^\\w.\\-\\u4e00-\\u9fff]"), "_")
     }
 
-    private fun save(context: Context, bitmap: Bitmap, name: String): Uri {
+    private fun save(context: Context, bitmap: Bitmap, name: String,
+                     model: com.spektra.latent.engine.PhotoModel, floating: Boolean): Uri {
+        fun encode(output: java.io.OutputStream) {
+            if (floating) FloatTiff.write(context, bitmap, model, output)
+            else {
+                // An explicitly requested JPEG always has sRGB samples,
+                // including when the look renders to a wide/linear bitmap.
+                val srgb = if (bitmap.config == Bitmap.Config.ARGB_8888 &&
+                    bitmap.colorSpace == ColorSpace.get(ColorSpace.Named.SRGB)) bitmap else
+                    Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888).also {
+                        Canvas(it).drawBitmap(bitmap, 0f, 0f, null)
+                    }
+                try {
+                    if (!srgb.compress(Bitmap.CompressFormat.JPEG, 95, output)) throw IOException("成片编码失败")
+                } finally { if (srgb !== bitmap) srgb.recycle() }
+            }
+        }
         if (Build.VERSION.SDK_INT >= 29) {
             val resolver = context.contentResolver
             val values = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, name)
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.MIME_TYPE, if (floating) "image/tiff" else "image/jpeg")
                 put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/${APP_NAME}")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
@@ -102,7 +127,7 @@ object Printer {
                 ?: throw IOException("相册没有接受这张成片")
             try {
                 (resolver.openOutputStream(uri) ?: throw IOException("成片写不进相册")).use {
-                    if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)) throw IOException("成片编码失败")
+                    encode(it)
                 }
                 resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
                 return uri
@@ -116,7 +141,7 @@ object Printer {
         val dir = File(context.filesDir, "prints").apply { mkdirs() }
         val file = File(dir, name)
         file.outputStream().use {
-            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)) throw IOException("成片编码失败")
+            encode(it)
         }
         return FileProvider.getUriForFile(context, context.packageName + ".files", file)
     }

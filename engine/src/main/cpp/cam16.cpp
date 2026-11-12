@@ -83,8 +83,14 @@ void cam16_setup_srgb(Cam16Setup& out) {
                          -0.9692436362808796, 1.8759675015077202,  0.04155505740717559,
                          0.05563007969699366, -0.20397695888897652, 1.0569715142428786}};
 
-    // sRGB whitepoint xy -> XYZ at Y=1
-    const double wp_xy[2] = {0.3127, 0.3290};
+    cam16_setup_rgb(out, out.m_to_xyz, out.m_to_rgb, 0.3127, 0.3290);
+}
+
+void cam16_setup_rgb(Cam16Setup& out, const Mat3& rgb_to_xyz, const Mat3& xyz_to_rgb,
+                     double white_x, double white_y) {
+    out.m_to_xyz = rgb_to_xyz;
+    out.m_to_rgb = xyz_to_rgb;
+    const double wp_xy[2] = {white_x, white_y};
     double xyz_w[3] = {wp_xy[0] / wp_xy[1], 1.0, (1.0 - wp_xy[0] - wp_xy[1]) / wp_xy[1]};
     double xyz_w_100[3] = {xyz_w[0] * 100.0, xyz_w[1] * 100.0, xyz_w[2] * 100.0};
     const double Y_w = xyz_w_100[1];

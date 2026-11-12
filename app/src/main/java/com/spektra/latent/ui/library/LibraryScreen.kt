@@ -53,6 +53,8 @@ import com.spektra.latent.APP_NAME
 import com.spektra.latent.LatentApp
 import com.spektra.latent.data.Frame
 import com.spektra.latent.data.Library
+import com.spektra.latent.data.PrintFormat
+import com.spektra.latent.ui.PrintFormatPicker
 import com.spektra.latent.ui.FileImage
 import com.spektra.latent.ui.GlyphField
 import com.spektra.latent.ui.GlyphSubject
@@ -105,6 +107,7 @@ fun LibraryScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
     var printing by remember { mutableStateOf(false) }
+    var printFormat by remember { mutableStateOf(PrintFormat.AUTO) }
     var applying by remember { mutableStateOf(false) }
     val saved by recipes.all.collectAsStateWithLifecycle()
     fun chosen() = rolls.flatMap { it.frames }.filter { it.id in selection }
@@ -234,13 +237,15 @@ fun LibraryScreen(
             Gap(height = 4.dp)
             Txt("每一张按它自己现在的设置冲印，在后台一张接一张地做，成片保存到相册的 ${APP_NAME} 相簿。尺寸是长边的像素数。", Type.label, color = Ink.Dim, maxLines = 3)
             Gap(height = 14.dp)
+            PrintFormatPicker(printFormat) { printFormat = it }
+            Gap(height = 14.dp)
             for ((edge, note) in listOf(2048 to "适合手机上看和分享", 3072 to "适合大屏", 4096 to "适合小幅打印", 0 to "各自的原尺寸")) {
                 Row(
                     Modifier.fillMaxWidth().pressable {
                         val frames = chosen()
                         printing = false
                         selection = emptySet()
-                        for (f in frames) prints.order(f, f.look, if (edge == 0) f.longEdge else edge)
+                        for (f in frames) prints.order(f, f.look, if (edge == 0) f.longEdge else edge, printFormat)
                         notice = "${frames.size} 张已经排进冲印队列。"
                     }.padding(vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,

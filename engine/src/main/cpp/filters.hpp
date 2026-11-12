@@ -10,8 +10,16 @@
 #include <cmath>
 #include <cstdint>
 #include <vector>
+#include <complex>
+#include <random>
 
 namespace spk {
+
+// Exact discrete radial-PSF convolution, using bounded overlap-save FFT tiles
+// and NumPy's whole-sample reflection at the image boundary. The PSF is an
+// odd square, normalized by the caller (diffusion_filter_psf in the reference).
+void convolve_reflected_psf(const float* in, float* out, int w, int h,
+                           const std::vector<double>& psf, int radius);
 
 constexpr double kPi = 3.14159265358979323846;
 
@@ -87,11 +95,15 @@ inline void exponential_blur_plane(const float* in, float* out, int w, int h,
 }
 
 // ---------------------------------------------------------------------------
-// RNG -- splitmix64 seeded, with Poisson / Binomial samplers (exact for the
-// small counts that shape grain texture, normal approximation above 30)
+// RNG -- splitmix64 seeded, with Poisson / Binomial distributions.
+// The reference photo default uses SciPy's full distributions rather than
+// fast_stats' normal approximations. Keep the same probability laws here.
 // ---------------------------------------------------------------------------
 
 struct Rng {
+    using result_type = uint64_t;
+    static constexpr result_type min() { return 0; }
+    static constexpr result_type max() { return UINT64_MAX; }
     uint64_t state;
     explicit Rng(uint64_t seed) : state(seed ? seed : 0x9E3779B97F4A7C15ull) {}
     uint64_t next_u64() {
@@ -101,6 +113,7 @@ struct Rng {
         z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
         return z ^ (z >> 31);
     }
+    result_type operator()() { return next_u64(); }
     double uniform() { return (next_u64() >> 11) * (1.0 / 9007199254740992.0); }
     double normal() {
         // Irwin-Hall approximation is slower; use Box-Muller with cached spare
@@ -114,48 +127,17 @@ struct Rng {
     double spare = 0.0;
     bool has_spare = false;
 
-    // Poisson: exact multiplication method for small means, normal
-    // approximation (continuity-corrected) above 30 where it is accurate to
-    // well under the grain's own sampling noise.
+    // The standard distributions use inversion/rejection algorithms; avoid
+    // changing the higher moments of high-count grain with a normal sample.
+    // RNG streams remain app-local: a Python seed is not a NumPy stream here.
     long poisson(double lambda) {
         if (!(lambda > 0.0)) return 0;
-        if (lambda < 30.0) {
-            const double L = std::exp(-lambda);
-            long k = 0;
-            double p = uniform();
-            while (p > L) {
-                k++;
-                p *= uniform();
-            }
-            return k;
-        }
-        const double v = std::floor(lambda + std::sqrt(lambda) * normal() + 0.5);
-        return v < 0.0 ? 0 : (long)v;
+        return std::poisson_distribution<long>(lambda)(*this);
     }
-    // Binomial: geometric-skip inversion while n*min(p,1-p) is small
-    // (expected n*p + 1 steps -- the old per-trial loop cost n uniforms per
-    // pixel in every shadow), normal approximation once the variance is >= 9.
     long binomial(long n, double p) {
         if (n <= 0 || !(p > 0.0)) return 0;
         if (p >= 1.0) return n;
-        if (p > 0.5) return n - binomial(n, 1.0 - p);
-        const double mean = n * p;
-        const double var = mean * (1.0 - p);
-        if (var < 9.0 || n < 30) {
-            const double log_q = std::log1p(-p);
-            long x = 0, sum = 0;
-            for (;;) {
-                const double u = std::max(uniform(), 1e-300);
-                sum += (long)std::floor(std::log(u) / log_q) + 1;
-                if (sum > n) break;
-                x++;
-            }
-            return x;
-        }
-        double v = std::floor(mean + std::sqrt(var) * normal() + 0.5);
-        if (v < 0.0) v = 0.0;
-        if (v > (double)n) v = (double)n;
-        return (long)v;
+        return std::binomial_distribution<long>(n, p)(*this);
     }
     // Lognormal with linear-space mean and standard deviation, matching
     // spektrafilm.utils.fast_lognormal_from_mean_std. The previous helper

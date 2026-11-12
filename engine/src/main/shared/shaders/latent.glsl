@@ -1,9 +1,9 @@
 // latent.glsl -- the picture's path from scene light to print, written once.
 //
-// This text is compiled twice: as GLSL ES 3.00 inside the preview, camera and
-// video shaders, and as C++ inside lt_fast.cpp (through lt_glsl.hpp, which
-// supplies vec2 / vec3 and the built-in functions). The preview on the screen
-// and the thumbnails made on the CPU therefore run the same arithmetic.
+// This text is shared with lt_fast.cpp through lt_glsl.hpp. Photos use only
+// the scene/finishing extensions around the exact spectral engine; the old
+// table-driven film functions remain for regression. Recording shaders sample
+// a separate complete exact-engine cube, then use the finishing functions.
 //
 // To stay valid in both languages this file uses only: float / int / uint,
 // vec2 / vec3 with .x .y .z, struct definitions without initialisers, and

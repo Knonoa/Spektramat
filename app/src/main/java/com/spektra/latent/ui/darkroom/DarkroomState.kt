@@ -33,15 +33,13 @@ import kotlin.math.max
 
 /**
  * One photograph on the bench: its look while it is being worked on, the undo
- * history, where the picture sits on the screen, and the GPU preview that
- * draws it.
+ * history, where the picture sits on the screen, and its full-engine proof.
  *
  * The look changes on every step of a ruler ([change]); a step becomes an undo
  * entry and is saved only when the ruler comes to rest ([commit]).
  *
- * The film outside the frame and the date are exposure on the negative, drawn
- * by the engine: the GPU cannot show them. While either is on, the picture on
- * screen is a [proof] -- a small print the engine makes after every change.
+ * Every processed view is a [proof], a small print made after each change.
+ * The GPU surface only displays the untouched source for comparison.
  */
 class DarkroomState(
     context: Context,
@@ -51,7 +49,7 @@ class DarkroomState(
 ) {
     private val app = context.applicationContext as LatentApp
     private val main = Handler(Looper.getMainLooper())
-    val preview = FilmPreview(context)
+    val preview = FilmPreview()
 
     var look by mutableStateOf(frame.look)
         private set
@@ -63,7 +61,7 @@ class DarkroomState(
     var canRedo by mutableStateOf(false)
         private set
 
-    /** The GPU has drawn this photograph at least once. Until then the thumbnail stands in. */
+    /** A full-engine proof has been published. Until then the thumbnail stands in. */
     var ready by mutableStateOf(false)
         private set
     var failure by mutableStateOf<String?>(null)
@@ -74,7 +72,7 @@ class DarkroomState(
     var placement by mutableStateOf(Placement())
         private set
 
-    /** The engine's small print of the current look, with the film's edge and the date; null when neither is on. */
+    /** The engine's small print, including the film edge and date when requested. */
     var proof by mutableStateOf<ImageBitmap?>(null)
         private set
     /** A proof is being made for a look newer than the one [proof] shows. */
@@ -88,8 +86,11 @@ class DarkroomState(
     private var viewH = 0f
     private var saving: Job? = null
     private var loading: Job? = null
-    @Volatile private var loadedAspect: String? = null
-    @Volatile private var proofSource: LinearImage? = null
+    private data class SourceKey(val aspect: String, val lensShading: Boolean)
+    private val sourceLock = Any()
+    @Volatile private var loadedSource: SourceKey? = null
+    private var proofSource: LinearImage? = null
+    @Volatile private var loadGeneration = 0L
     private var proofJob: Job? = null
     // declared before init: the collector started there reads it at once
     private data class Want(val look: Look, val sharp: Boolean)
@@ -98,30 +99,37 @@ class DarkroomState(
 
     /** Width and height of what is on screen: the proof, or the frame cut to its shape. */
     val shownSize: IntArray
-        get() = proof?.let { intArrayOf(it.width, it.height) } ?: look.frameSize(frame.width, frame.height)
+        get() = if (comparing) look.frameSize(frame.width, frame.height)
+            else proof?.let { intArrayOf(it.width, it.height) } ?: look.frameSize(frame.width, frame.height)
 
     init {
-        preview.onDrawn = { main.post { ready = true } }
         preview.onError = { reason -> main.post { failure = reason } }
         proofJob = scope.launch(Dispatchers.Default) { proofs() }
-        load(look.aspect)
+        load(look)
     }
 
     /** Reads the original, cut to [aspect], for the GPU and for proofs. */
-    private fun load(aspect: String) {
+    private fun load(l: Look) {
         loading?.cancel()
+        val generation = ++loadGeneration
+        val key = SourceKey(l.aspect, l.lensShading)
         loading = scope.launch(Dispatchers.IO) {
             try {
-                Decoder.decode(frame.file, PREVIEW_EDGE, look.lensShading, aspect).use { image ->
-                    if (disposed) return@use
+                Decoder.decode(frame.file, PREVIEW_EDGE, key.lensShading, key.aspect).use { image ->
+                    if (disposed || generation != loadGeneration) return@use
                     preview.setImage(image)
                     val small = image.scaled(PROOF_EDGE)
-                    val old = proofSource
-                    proofSource = small
-                    old?.close()
-                    loadedAspect = aspect
+                    synchronized(sourceLock) {
+                        if (disposed || generation != loadGeneration) {
+                            small.close()
+                        } else {
+                            proofSource?.close()
+                            proofSource = small
+                            loadedSource = key
+                        }
+                    }
                 }
-                main.post { show() }
+                main.post { if (!disposed && generation == loadGeneration) show() }
             } catch (e: Exception) {
                 main.post { failure = e.message ?: "这张照片读不出来" }
             } catch (e: OutOfMemoryError) {
@@ -135,11 +143,12 @@ class DarkroomState(
     fun change(next: Look) {
         if (next == look) return
         val reshaped = next.aspect != look.aspect
+        val reload = reshaped || next.lensShading != look.lensShading
         look = next
         if (reshaped) {
             placement = placement.copy(scale = 1f, panX = 0f, panY = 0f)
-            load(next.aspect)
         }
+        if (reload) load(next)
         show()
     }
 
@@ -167,11 +176,11 @@ class DarkroomState(
     }
 
     private fun apply(l: Look) {
-        val reshaped = l.aspect != look.aspect
+        val reshaped = l.aspect != look.aspect || l.lensShading != look.lensShading
         settled = l
         look = l
         history()
-        if (reshaped) load(l.aspect)
+        if (reshaped) load(l)
         show()
         save()
     }
@@ -242,16 +251,7 @@ class DarkroomState(
     }
 
     private fun show() {
-        preview.show(
-            PreviewFrame(
-                look = look,
-                meteredEv = frame.meteredEv,
-                mode = if (comparing) 1 else 0,
-                placement = placement,
-                printLongEdge = look.frameSize(frame.width, frame.height).max(),
-                seed = (frame.id % 1000).toFloat() + 1f,
-            ),
-        )
+        preview.show(PreviewFrame(placement = placement))
         wantProof()
     }
 
@@ -262,14 +262,9 @@ class DarkroomState(
     /** Asks for a proof of the current look; the newest request wins, an older one under way is stopped. */
     private fun wantProof() {
         val l = look
-        if (rebate(l).idle) {
-            wants.value = null
-            if (proof != null) proof = null
-            proofing = false
-            FilmEngine.cancelProof()
-            return
-        }
-        // sharper once the hand has let go; smaller, and so quicker, while a ruler is still moving
+        // Every darkroom frame is a photo render, including a plain frame
+        // without film edge/date. The previous exact proof stays visible while
+        // the latest look is rendered.
         val want = Want(l, l == settled)
         if (wants.value == want) return
         proofing = true
@@ -280,31 +275,38 @@ class DarkroomState(
     private suspend fun proofs() = wants.collectLatest { want ->
         if (want == null) return@collectLatest
         // the original may still be being read, or read again in a new shape
-        while (proofSource == null || loadedAspect != want.look.aspect) delay(60)
-        val source = proofSource ?: return@collectLatest
+        val key = SourceKey(want.look.aspect, want.look.lensShading)
+        while (loadedSource != key) delay(60)
         try {
             val l = want.look
-            val bitmap = source.scaled(if (want.sharp) PROOF_EDGE else DRAFT_EDGE).use { copy ->
+            val source = synchronized(sourceLock) {
+                if (loadedSource == key) proofSource?.scaled(if (want.sharp) PROOF_EDGE else DRAFT_EDGE) else null
+            } ?: return@collectLatest
+            val bitmap = source.use { copy ->
                 FilmEngine.develop(
-                    copy, l.grade(frame.meteredEv),
+                    copy, l.photoGrade(),
                     l.order(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number),
                     l.finish(), l.finishTable(), lane = FilmEngine.PROOF,
                 )
             }
             val image = bitmap.asImageBitmap()
             main.post {
-                if (!disposed && wants.value != null) {
+                if (!disposed && wants.value == want && loadedSource == key) {
                     proof = image
+                    ready = true
+                    failure = null
                     placement = clamp(placement)
-                    if (wants.value == want) proofing = false
-                }
+                    proofing = false
+                } else bitmap.recycle()
             }
         } catch (e: DevelopCancelled) {
             // a newer look is waiting
         } catch (e: Exception) {
-            if (proofSource === source && !disposed) {
+            if (wants.value == want && !disposed) {
                 Journal.w(TAG, "no proof", e)
-                main.post { proofing = false; failure = e.message ?: "片边排不出来" }
+                main.post { if (!disposed && wants.value == want) {
+                    proofing = false; failure = e.message ?: "样张处理失败"
+                } }
             }
         } catch (e: OutOfMemoryError) {
             main.post { proofing = false }
@@ -317,15 +319,19 @@ class DarkroomState(
         disposed = true
         saving?.cancel()
         loading?.cancel()
+        proofJob?.cancel()
         FilmEngine.cancelProof()
         val toSave = settled
         if (toSave != frame.look) app.scope.launch { library.saveLook(frame.id, toSave) }
         preview.release()
-        val source = proofSource
         // the proof loop may still hold it for a moment: it is closed once that loop has ended
         app.scope.launch(Dispatchers.Default) {
             proofJob?.join()
-            source?.close()
+            synchronized(sourceLock) {
+                proofSource?.close()
+                proofSource = null
+                loadedSource = null
+            }
         }
     }
 

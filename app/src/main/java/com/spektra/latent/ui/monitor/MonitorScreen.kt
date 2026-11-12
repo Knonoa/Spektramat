@@ -106,7 +106,7 @@ fun MonitorScreen(monitor: Monitor, recipes: Recipes, onBack: () -> Unit, onOpen
         Sheet(choosingLook, { choosingLook = false }) {
             Txt("监看和收片用哪种冲洗", Type.heading)
             Gap(height = 4.dp)
-            Txt("监看画面按这卷胶片显示（不含颗粒和光晕）；收到的原片带着这份设置进片库，之后在暗房里可以换。", Type.label, color = Ink.Dim, maxLines = 3)
+            Txt("普通监看使用完整胶片算法；收到的原片带着这份设置进片库，之后在暗房里可以换。", Type.label, color = Ink.Dim, maxLines = 3)
             Gap(height = 14.dp)
             StockStrip(filmStocks(), monitor.look.film, { monitor.change(monitor.look.withFilm(it)) })
             if (saved.isNotEmpty()) {
@@ -174,6 +174,7 @@ private fun Idle(monitor: Monitor, onBack: () -> Unit, onLook: () -> Unit) {
             SettingRow("胶片监看", "监看画面过一遍胶片。关掉看到的就是相机给的画面。") {
                 Toggle(monitor.filmOn, monitor::film, "胶片监看")
             }
+            Txt("照片与普通监看使用完整算法。胶片录像关闭光晕、散射、颗粒、眩光、模糊和锐化。", Type.caption, maxLines = 3)
             SettingRow("冲洗方式", "${filmName(monitor)}。收到的原片也带着它进片库。") { Pill("更换", onLook) }
             SettingRow("录制时带上参数", "把感光度、光圈、快门烧在监看录像的顶上。") {
                 Toggle(monitor.burnIn, monitor::burnIn, "录制时带上参数")

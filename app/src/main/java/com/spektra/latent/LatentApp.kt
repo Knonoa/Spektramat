@@ -62,6 +62,7 @@ class LatentApp : Application() {
                 library, PrintDesk(this@LatentApp, scope, library), recipes,
                 Monitor(this@LatentApp, library, scope), LightTableStore(this@LatentApp),
             )
+            launch { library.refreshPreviews() }
             if (BuildConfig.DEBUG) importInbox(library)
         }
     }

@@ -10,8 +10,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.spektra.latent.engine.DevelopCancelled
 import com.spektra.latent.engine.FilmEngine
-import com.spektra.latent.engine.FilmTables
 import com.spektra.latent.model.Look
+import com.spektra.latent.model.Shooting
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,7 +22,8 @@ import kotlinx.coroutines.withContext
 import kotlin.math.min
 
 /** One print on order: which frame, with which look, and how far along it is. */
-class PrintJob internal constructor(val id: Long, val frame: Frame, val look: Look, val longEdge: Int) {
+class PrintJob internal constructor(val id: Long, val frame: Frame, val look: Look, val longEdge: Int,
+                                    val format: PrintFormat = PrintFormat.AUTO) {
     sealed interface State {
         data object Waiting : State
         data object Working : State
@@ -65,8 +66,8 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
     /** Every order that has not been dismissed, oldest first. Read and changed on the main thread. */
     val jobs = mutableStateListOf<PrintJob>()
 
-    fun order(frame: Frame, look: Look, longEdge: Int): PrintJob {
-        val job = PrintJob(nextId++, frame, look, longEdge)
+    fun order(frame: Frame, look: Look, longEdge: Int, format: PrintFormat = PrintFormat.AUTO): PrintJob {
+        val job = PrintJob(nextId++, frame, look, longEdge, format)
         jobs += job
         scope.launch { run(job) }
         return job
@@ -99,7 +100,7 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
             }
         }
         try {
-            val printed = Printer.print(app, library, job.frame, job.look, job.longEdge) { job.stage = it }
+            val printed = Printer.print(app, library, job.frame, job.look, job.longEdge, job.format) { job.stage = it }
             if (job.stopped) printed.shown.recycle() else job.state = PrintJob.State.Done(printed)
         } catch (e: DevelopCancelled) {
             // stopped by the person: already off the desk
@@ -115,17 +116,10 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
     private suspend fun bigPixels(frame: Frame, look: Look): Pair<IntArray, IntArray> = withContext(Dispatchers.IO) {
         Decoder.decode(frame.file, 96, look.lensShading, look.aspect).use { small ->
             val original = FilmEngine.display(small)
-            val film = FilmTables().use { tables ->
-                tables.bake(
-                    look.film, look.paper, look.scanFilm,
-                    interLayer = look.interLayer > 0f, interLayerAmount = look.interLayer / 100f,
-                    yShift = look.filterY, mShift = look.filterM,
-                )
-                FilmEngine.renderFast(
-                    small, tables, look.grade(frame.meteredEv), tables.filmBlock(1f, look.printGain, 0f, 0f, 1f),
-                    look.finish(), look.finishTable(),
-                )
-            }
+            val order = look.order(seed = frame.id * 7919L + 1L, shooting = Shooting.of(frame),
+                frameSeed = Library.frameSeed(frame), number = frame.number)
+            val film = FilmEngine.develop(small, look.photoGrade(), order,
+                look.finish(), look.finishTable(), lane = FilmEngine.THUMB)
             try {
                 mosaic(original) to mosaic(film)
             } finally {

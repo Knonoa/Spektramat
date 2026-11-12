@@ -1,12 +1,9 @@
 // lt_fast.hpp -- shaders/latent.glsl run on the CPU.
 //
-// Three users:
-//   * the finished print: grade_image() corrects the scene with the very code
-//     the preview shader runs, and the result goes to the full engine;
-//   * thumbnails: render_fast() is the preview shader's twin, tables and all,
-//     for places without a GL context;
-//   * tools/host/fast_vs_engine.cpp, which measures the table-driven path
-//     against the engine.
+// grade_image() and finish_*() retain the app's scene/finishing extensions.
+// Photos run the full spectral engine between these operations. render_fast()
+// remains only for legacy host regression; Android photo callers cannot use it.
+// The recording cube is sampled from the complete engine by lt_video.hpp.
 //
 // The two parameter blocks are flat arrays of floats in the order of the
 // structs in latent.glsl. The app sends the same arrays to the GPU as uniforms
@@ -72,6 +69,9 @@ void render_fast(const FilmTables& tables, const float grade[kGradeFloats], cons
 // Finishes a picture the engine has made: display-linear planes in, sRGB 8-bit
 // RGBA out (w * h * 4). The same code as the preview's last step.
 void finish_planes(const float finish[kFinishFloats], const float* finish_table, const float* r, const float* g,
-                   const float* b, int w, int h, uint8_t* rgba);
+                   const float* b, int w, int h, uint8_t* rgba, bool cctf_encoding = true);
+// Float output for colour-managed F16 export, preserving out-of-cube values.
+void finish_float_planes(const float finish[kFinishFloats], const float* finish_table, const float* r,
+                         const float* g, const float* b, int w, int h, float* rgb);
 
 }  // namespace lt

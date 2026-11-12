@@ -1,4 +1,4 @@
-// engine_data.hpp -- loader for the baked engine.bin asset (format v2).
+// engine_data.hpp -- loader for the baked engine.bin asset (formats v2/v3/v4).
 //
 // The binary is written by tools/bake_assets.py, which takes every number
 // from the spektrafilm Python reference itself (see that script's header).
@@ -63,6 +63,8 @@ struct FilmProfile {
     std::vector<float> log_exposure;    // n
     std::vector<float> density_curves;  // n*3 (raw, not normalised)
     std::vector<float> density_curves_layers;  // n*3*3, [e][layer][ch]
+    std::vector<float> sensitivity;      // v3: n_wl*3, linear, NaN -> 0
+    std::vector<float> adaptation_window, adaptation_surface;
 };
 
 struct PaperProfile {
@@ -78,6 +80,9 @@ struct PaperProfile {
     std::vector<float> log_exposure;    // n
     float dc_min[3] = {}, dc_max[3] = {};  // nanmin/nanmax of the raw curves
     std::vector<float> print_curves;    // n*3, fitted model evaluated (develop_print_morph)
+    std::vector<float> density_curves;  // v3: original, for black/white reference
+    std::string model_type;
+    std::vector<float> model_centers, model_amplitudes, model_sigmas;
 };
 
 struct NeutralFilter {
@@ -86,6 +91,7 @@ struct NeutralFilter {
 };
 
 struct EngineData {
+    uint32_t format_version = 0;
     int n_wl = 81;
     std::vector<float> wavelengths;
     std::vector<float> cmfs;        // n_wl*3
@@ -95,6 +101,11 @@ struct EngineData {
     std::vector<FilmProfile> films;
     std::vector<PaperProfile> papers;
     std::vector<NeutralFilter> neutral_filters;
+    int hanatos_size = 0;
+    std::vector<float> hanatos_spectra;  // v4: tc*tc*n_wl, source half widened losslessly
+    std::vector<float> mallett_basis;    // v4: n_wl*3
+    std::vector<float> input_locus_xy;
+    std::vector<double> input_oklch_l, input_oklch_h, input_oklch_cmax;
 
     const FilmProfile* film(const std::string& stock) const {
         for (auto& f : films) if (f.stock == stock) return &f;
@@ -134,6 +145,10 @@ public:
         std::memcpy(out.data(), p, n * 4); p += n * 4;
     }
     void f32_arr(float* out, size_t n) { need(n * 4); std::memcpy(out, p, n * 4); p += n * 4; }
+    void f64_vec(std::vector<double>& out, size_t n) {
+        out.resize(n); need(n * 8);
+        std::memcpy(out.data(), p, n * 8); p += n * 8;
+    }
     void f16_vec(std::vector<float>& out, size_t n) {
         out.resize(n); need(n * 2);
         for (size_t i = 0; i < n; i++) {
@@ -156,7 +171,9 @@ public:
 inline void load_engine_data(const uint8_t* data, size_t size, EngineData& out) {
     Reader r(data, size);
     if (r.u32() != 0x31544B53) throw std::string("engine.bin: bad magic");
-    if (r.u32() != 2) throw std::string("engine.bin: unsupported version (re-run tools/bake_assets.py)");
+    out.format_version = r.u32();
+    if (out.format_version < 2 || out.format_version > 4)
+        throw std::string("engine.bin: unsupported version (re-run tools/bake_assets.py)");
 
     out.n_wl = (int)r.u32();
     const size_t nwl = (size_t)out.n_wl;
@@ -186,13 +203,19 @@ inline void load_engine_data(const uint8_t* data, size_t size, EngineData& out) 
         r.f32_arr(f.rgb_to_xyz, 9);
         r.f32_arr(f.xyz_to_rgb_view, 9);
         f.tc_size = (int)r.u32();
-        r.f16_vec(f.tc_lut, (size_t)f.tc_size * f.tc_size * 3);
+        if (out.format_version >= 3) r.f32_vec(f.tc_lut, (size_t)f.tc_size * f.tc_size * 3);
+        else r.f16_vec(f.tc_lut, (size_t)f.tc_size * f.tc_size * 3);
         r.f32_vec(f.channel_density, nwl * 3);
         r.f32_vec(f.base_density, nwl);
         uint32_t n = r.u32();
         r.f32_vec(f.log_exposure, n);
         r.f32_vec(f.density_curves, (size_t)n * 3);
         r.f32_vec(f.density_curves_layers, (size_t)n * 9);
+        if (out.format_version >= 3) {
+            r.f32_vec(f.sensitivity, nwl * 3);
+            auto count = r.u32(); r.f32_vec(f.adaptation_window, count);
+            count = r.u32(); r.f32_vec(f.adaptation_surface, count);
+        }
     }
 
     out.papers.resize(r.u32());
@@ -212,6 +235,13 @@ inline void load_engine_data(const uint8_t* data, size_t size, EngineData& out) 
         r.f32_arr(pa.dc_min, 3);
         r.f32_arr(pa.dc_max, 3);
         r.f32_vec(pa.print_curves, (size_t)n * 3);
+        if (out.format_version >= 3) {
+            r.f32_vec(pa.density_curves, (size_t)n * 3);
+            pa.model_type = r.str();
+            auto count = r.u32(); r.f32_vec(pa.model_centers, count);
+            count = r.u32(); r.f32_vec(pa.model_amplitudes, count);
+            count = r.u32(); r.f32_vec(pa.model_sigmas, count);
+        }
     }
 
     out.neutral_filters.resize(r.u32());
@@ -220,6 +250,15 @@ inline void load_engine_data(const uint8_t* data, size_t size, EngineData& out) 
         nf.illuminant = r.str();
         nf.film = r.str();
         nf.c = r.f32(); nf.m = r.f32(); nf.y = r.f32();
+    }
+    if (out.format_version >= 4) {
+        out.hanatos_size = (int)r.u32();
+        r.f32_vec(out.hanatos_spectra, (size_t)out.hanatos_size * out.hanatos_size * nwl);
+        r.f32_vec(out.mallett_basis, nwl * 3);
+        auto count = r.u32(); r.f32_vec(out.input_locus_xy, count * 2);
+        count = r.u32(); r.f64_vec(out.input_oklch_l, count);
+        count = r.u32(); r.f64_vec(out.input_oklch_h, count);
+        r.f64_vec(out.input_oklch_cmax, out.input_oklch_l.size() * out.input_oklch_h.size());
     }
     for (auto& il : out.illuminants)
         if ((int)il.values.size() != out.n_wl) throw std::string("engine.bin: bad illuminant");

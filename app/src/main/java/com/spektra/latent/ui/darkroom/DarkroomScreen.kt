@@ -15,9 +15,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.spektra.latent.APP_NAME
 import com.spektra.latent.data.Recipes
+import com.spektra.latent.data.PrintFormat
 import com.spektra.latent.model.Aspects
 import com.spektra.latent.model.Format
 import com.spektra.latent.ui.TextEntry
+import com.spektra.latent.ui.PrintFormatPicker
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -93,7 +95,7 @@ private enum class Stage(val title: String) { Scene("原片"), Film("胶片"), E
  * the bottom sets whichever control is selected.
  */
 @Composable
-fun DarkroomScreen(library: Library, recipes: Recipes, frameId: Long, onBack: () -> Unit, onDevelop: (Look, Int) -> Unit) {
+fun DarkroomScreen(library: Library, recipes: Recipes, frameId: Long, onBack: () -> Unit, onDevelop: (Look, Int, PrintFormat) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val frame = remember(frameId) { library.frame(frameId) }
@@ -114,6 +116,7 @@ fun DarkroomScreen(library: Library, recipes: Recipes, frameId: Long, onBack: ()
     var filmAt by remember { mutableIntStateOf(-1) }
     var printAt by remember { mutableIntStateOf(-1) }
     var ordering by remember { mutableStateOf(false) }
+    var printFormat by remember { mutableStateOf(PrintFormat.AUTO) }
     var recipesOpen by remember { mutableStateOf(false) }
     var recipeName by remember { mutableStateOf("") }
     val saved by recipes.all.collectAsStateWithLifecycle()
@@ -149,7 +152,7 @@ fun DarkroomScreen(library: Library, recipes: Recipes, frameId: Long, onBack: ()
         if (view.width > 0) {
             val shown = state.shownSize
             val r = state.placement.rect(view.width.toFloat(), view.height.toFloat(), shown[0], shown[1])
-            AnimatedVisibility(!state.ready, enter = fadeIn(tween(0)), exit = fadeOut(tween(260))) {
+            AnimatedVisibility(!state.ready && !state.comparing, enter = fadeIn(tween(0)), exit = fadeOut(tween(260))) {
                 FileImage(
                     frame.thumb,
                     Modifier
@@ -316,11 +319,13 @@ fun DarkroomScreen(library: Library, recipes: Recipes, frameId: Long, onBack: ()
             Gap(height = 4.dp)
             Txt("冲印在后台进行，不耽误继续调整；成片保存到相册的 ${APP_NAME} 相簿。尺寸是长边的像素数。", Type.label, color = Ink.Dim, maxLines = 3)
             Gap(height = 14.dp)
+            PrintFormatPicker(printFormat) { printFormat = it }
+            Gap(height = 14.dp)
             val native = state.look.frameSize(frame.width, frame.height).max()
             val sizes = listOf(2048, 3072, 4096).filter { it < native } + native
             for (edge in sizes) {
                 Row(
-                    Modifier.fillMaxWidth().pressable { ordering = false; state.commit(); onDevelop(state.look, edge) }.padding(vertical = 12.dp),
+                    Modifier.fillMaxWidth().pressable { ordering = false; state.commit(); onDevelop(state.look, edge, printFormat) }.padding(vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Txt("$edge", Type.edgeLarge, Modifier.width(88.dp))

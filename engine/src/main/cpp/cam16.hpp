@@ -3,11 +3,13 @@
 // Adapted from SpektraLab's engine/src/core/cam16.{hpp,cpp} (GPL-3.0), which
 // itself matches colour-science's XYZ_to_CAM16UCS / CAM16UCS_to_XYZ under the
 // canonical display-review viewing conditions used by spektrafilm's output
-// gamut compression. The output colour space here is always sRGB, so the
-// RGB<->XYZ matrices are the fixed D65 ones.
+// gamut compression. Each output colour space supplies its RGB/XYZ matrices
+// and whitepoint to the shared setup.
 #pragma once
 
 #include <cmath>
+#include <algorithm>
+#include <string>
 #include <vector>
 
 namespace spk {
@@ -34,7 +36,7 @@ struct Cam16Setup {
     double n = 0, F_L = 0, N_bb = 0, N_cb = 0, z = 0, A_w = 0;
     double c = kCam16c, N_c = kCam16Nc;
     double D_rgb[3] = {1, 1, 1};
-    Mat3 m_to_xyz, m_to_rgb;  // linear sRGB <-> XYZ, D65
+    Mat3 m_to_xyz, m_to_rgb;  // output-linear RGB <-> XYZ
     double white_Jp = 0.0;
     double e_c = 1.0, F_L_4 = 1.0;  // pow(1.64 - 0.29^n, 0.73), F_L^0.25 (cached)
     double l_grid[kCmaxNL];
@@ -42,10 +44,20 @@ struct Cam16Setup {
     std::vector<float> c_max_table;  // kCmaxNL * kCmaxNH, row-major
 };
 
+struct OutputGamutParams {
+    std::string algorithm = "cam16ucs";
+    float knee[3] = {0, 1, 6};
+    bool lightness = true;
+    float lightness_knee[3] = {.7f, 1, 2.2f};
+};
+
 double reinhard_knee(double d, double threshold, double limit, double power);
 
 // Builds the whole setup including the C_max table (a few hundred ms).
 void cam16_setup_srgb(Cam16Setup& out);
+// The same viewing conditions and gamut search for another output RGB space.
+void cam16_setup_rgb(Cam16Setup& out, const Mat3& rgb_to_xyz, const Mat3& xyz_to_rgb,
+                     double white_x, double white_y);
 
 void xyz_to_cam16ucs(const Cam16Setup& st, const double xyz[3], double jab[3]);
 void cam16ucs_to_xyz(const Cam16Setup& st, const double jab[3], double xyz[3]);
@@ -53,9 +65,17 @@ void cam16ucs_to_xyz(const Cam16Setup& st, const double jab[3], double xyz[3]);
 // The full spektrafilm output gamut compression for one pixel: chroma knee
 // (cam16ucs, knee 0/1/6) + lightness roll-off (0.7/1.0/2.2). rgb in/out are
 // linear sRGB.
-inline void compress_output_pixel(const Cam16Setup& st, double rgb[3]) {
-    const double t = 0.0, lim = 1.0, pw = 6.0;
-    const double lt = 0.7, ll = 1.0, lp = 2.2;
+inline void compress_output_pixel(const Cam16Setup& st, double rgb[3], const OutputGamutParams& p = {}) {
+    if (p.algorithm == "off") return;
+    const double t = p.knee[0], lim = p.knee[1], pw = p.knee[2];
+    const double lt = p.lightness_knee[0], ll = p.lightness_knee[1], lp = p.lightness_knee[2];
+    if (p.algorithm == "aces_rgc") {
+        const double ach = std::max({rgb[0], rgb[1], rgb[2]});
+        if (ach > 1e-12)
+            for (int c = 0; c < 3; c++) rgb[c] = ach * (1 - reinhard_knee((ach - rgb[c]) / ach, t, lim, pw));
+        return;
+    }
+    if (p.algorithm != "cam16ucs") throw std::string("unsupported output gamut algorithm: ") + p.algorithm;
 
     // No in-cube shortcut: the reference's knee has threshold 0, so every
     // pixel's chroma (and every J' above 0.7 white) is rolled off.
@@ -66,7 +86,7 @@ inline void compress_output_pixel(const Cam16Setup& st, double rgb[3]) {
 
     // lightness compression, normalized by the whitepoint's J'
     double Jp = jab[0] / st.white_Jp;
-    Jp = reinhard_knee(Jp, lt, ll, lp);
+    if (p.lightness) Jp = reinhard_knee(Jp, lt, ll, lp);
     jab[0] = Jp * st.white_Jp;
 
     double Cp = std::hypot(jab[1], jab[2]);

@@ -33,6 +33,13 @@ class Recipes(context: Context) {
                 val o = array.getJSONObject(i)
                 Recipe(o.getLong("id"), o.getString("name"), Look.fromJson(o.optJSONObject("look")?.toString()))
             }
+            if ((0 until array.length()).any {
+                (array.getJSONObject(it).optJSONObject("look")?.optInt("algorithmSchema") ?: 0) <
+                    com.spektra.latent.engine.PhotoModel.SCHEMA
+            }) {
+                write(_all.value)
+                Journal.i(TAG, "migrated saved recipes to reference algorithm schema ${com.spektra.latent.engine.PhotoModel.SCHEMA}")
+            }
         } catch (e: Exception) {
             // a file that cannot be read is kept beside a fresh start, not overwritten
             Journal.w(TAG, "recipes could not be read", e)

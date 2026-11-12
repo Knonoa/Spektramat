@@ -44,6 +44,22 @@ internal object Native {
         image: Long, tables: Long, grade: FloatArray, film: FloatArray, finish: FloatArray, finishTable: FloatArray,
         out: Bitmap,
     ): String?
+    external fun newVideoLut(): Long
+    external fun freeVideoLut(lut: Long)
+    external fun bakeVideoLut(
+        lut: Long, film: String, paper: String, scanFilm: Boolean, look: FloatArray,
+        grade: FloatArray, model: FloatArray, size: Int,
+    ): String?
+    external fun videoLutBuffer(lut: Long): ByteBuffer?
+    external fun renderVideoLut(lut: Long, source: Bitmap, finish: FloatArray, finishTable: FloatArray, out: Bitmap): String?
+    external fun bakePreviewLut(
+        lut: Long, film: String, paper: String, scanFilm: Boolean, look: FloatArray,
+        model: FloatArray, size: Int,
+    ): String?
+    external fun meterPreview(image: Long, grade: FloatArray, method: Int): Float
+    external fun meterPreviewRgba(rgba: ByteBuffer, width: Int, height: Int, grade: FloatArray, method: Int): Float
+    external fun renderPreviewLut(lut: Long, source: Bitmap, grade: FloatArray, autoEv: Float,
+                                  finish: FloatArray, finishTable: FloatArray, out: Bitmap): String?
     external fun cancelDevelop()
     external fun cancelProof()
     external fun developSize(w: Int, h: Int, rebate: Array<String>?, rebateNumbers: FloatArray?): IntArray?
@@ -51,7 +67,7 @@ internal object Native {
         image: Long, grade: FloatArray, film: String, paper: String, scanFilm: Boolean,
         look: FloatArray, finish: FloatArray, finishTable: FloatArray,
         rebate: Array<String>?, rebateNumbers: FloatArray?, lane: Int,
-        seed: Long, out: Bitmap, listener: StageListener?,
+        seed: Long, out: Bitmap, listener: StageListener?, model: FloatArray, photoMode: Int, outputColorSpace: String,
     ): String?
 }
 

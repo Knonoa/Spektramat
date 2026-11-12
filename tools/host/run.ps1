@@ -2,6 +2,7 @@
 #   pwsh -NoProfile -File tools/host/run.ps1
 param([string]$OutputDirectory = "")
 $ErrorActionPreference = 'Stop'
+& (Join-Path $PSScriptRoot 'check_photo_routes.ps1')
 $project = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $project 'build\host' }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
@@ -37,3 +38,7 @@ New-Item -ItemType Directory -Force -Path $proofs | Out-Null
 $fastCode = $LASTEXITCODE
 
 if ($fastCode -ne 0) { exit 1 }
+
+$photo = Build-Test 'photo-contract' (@((Join-Path $PSScriptRoot 'photo_contract.cpp')) + $engine)
+& $photo $bin 2>&1 | Tee-Object (Join-Path $OutputDirectory 'photo-contract.txt')
+if ($LASTEXITCODE -ne 0) { exit 1 }

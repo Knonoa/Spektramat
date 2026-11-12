@@ -28,7 +28,7 @@ import com.spektra.latent.BuildConfig
 import com.spektra.latent.data.Frame
 import com.spektra.latent.data.Library
 import com.spektra.latent.engine.FilmEngine
-import com.spektra.latent.engine.FilmTables
+import com.spektra.latent.engine.VideoLut
 import com.spektra.latent.model.Look
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -102,8 +102,6 @@ class Monitor(context: Context, private val library: Library, private val scope:
     @Volatile var watched = false
     private var task: Job? = null
     private var asked: TetherDevice? = null
-    private val tables = FilmTables()
-    private var baked: Look? = null
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -184,6 +182,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
     }
 
     fun film(on: Boolean) {
+        if (recording || wantRecording) return
         filmOn = on
         prefs.edit().putBoolean("film", on).apply()
     }
@@ -199,6 +198,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
     }
 
     fun change(next: Look) {
+        if (recording || wantRecording) return
         if (next == look) return
         look = next
         prefs.edit().putString("look", next.toJson().toString()).apply()
@@ -206,6 +206,9 @@ class Monitor(context: Context, private val library: Library, private val scope:
 
     fun toggleRecording() {
         if (task?.isActive != true) return
+        if (!wantRecording && filmOn) {
+            notice = "胶片录像关闭自动测光、高光增强、扩散与模糊、光晕、散射、DIR 空间扩散、颗粒、眩光、黑白校正和锐化；收到的照片使用完整算法。"
+        }
         wantRecording = !wantRecording
     }
 
@@ -222,6 +225,8 @@ class Monitor(context: Context, private val library: Library, private val scope:
         task = scope.launch(Dispatchers.IO) {
             var camera: TetherCamera? = null
             var recorder: MonitorRecorder? = null
+            var videoLut: VideoLut? = null
+            var videoLook: Look? = null
             var video: File? = null
             var recordingSince = 0L
             var lastPoll = 0L
@@ -230,12 +235,16 @@ class Monitor(context: Context, private val library: Library, private val scope:
             var missingSince = 0L
 
             fun endRecording() {
-                val r = recorder ?: return
+                val r = recorder
                 recorder = null
                 wantRecording = false
                 recording = false
+                videoLut?.close()
+                videoLut = null
+                videoLook = null
                 val f = video
                 video = null
+                if (r == null) return
                 try {
                     r.close()
                 } catch (e: Exception) {
@@ -310,7 +319,16 @@ class Monitor(context: Context, private val library: Library, private val scope:
                     }
                     val fitted = fit(raw, resolution)
                     if (fitted !== raw) raw.recycle()
-                    val shown = if (filmOn) developed(fitted) else fitted
+                    val shown = if (filmOn && wantRecording) {
+                        val current = look
+                        if (videoLook != current) {
+                            val next = VideoLut.bake(current.order(0L), current.grade(0f))
+                            videoLut?.close(); videoLut = next; videoLook = current
+                            Journal.i(TAG, next.metadata.toString())
+                        }
+                        try { checkNotNull(videoLut).render(fitted, current.finish(), current.finishTable()) }
+                        finally { fitted.recycle() }
+                    } else if (filmOn) developed(fitted) else fitted
                     if (wantRecording && recorder == null) {
                         try {
                             val f = File(incoming, "monitor-${System.currentTimeMillis()}.mp4")
@@ -374,21 +392,15 @@ class Monitor(context: Context, private val library: Library, private val scope:
         return DemoCamera(any.file)
     }
 
-    /** The frame through the monitor's film: the tables only, no grain and no halation, so it keeps up with the camera. */
+    /** The non-recording monitor is a photo preview and uses the full engine. */
     private fun developed(frame: Bitmap): Bitmap {
         val l = look
-        if (baked != l) {
-            tables.bake(
-                l.film, l.paper, l.scanFilm,
-                interLayer = l.interLayer > 0f, interLayerAmount = l.interLayer / 100f, yShift = l.filterY, mShift = l.filterM,
-            )
-            baked = l
-        }
         val source = if (frame.config == Bitmap.Config.ARGB_8888) frame else frame.copy(Bitmap.Config.ARGB_8888, false).also { frame.recycle() }
-        return FilmEngine.fromBitmap(source).use { linear ->
-            // the camera has chosen the exposure: its picture is taken as it is
-            FilmEngine.renderFast(linear, tables, l.grade(0f), tables.filmBlock(1f, l.printGain, 0f, 0f, 1f), l.finish(), l.finishTable())
-        }.also { source.recycle() }
+        return try {
+            FilmEngine.fromBitmap(source).use { linear ->
+                FilmEngine.develop(linear, l.photoGrade(), l.order(seed = 1L), l.finish(), l.finishTable(), lane = FilmEngine.PROOF)
+            }
+        } finally { source.recycle() }
     }
 
     private suspend fun receive(camera: TetherCamera) {

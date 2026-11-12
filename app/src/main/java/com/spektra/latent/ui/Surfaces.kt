@@ -50,6 +50,9 @@ private val thumbs = object : LruCache<String, ImageBitmap>(64 * 1024 * 1024) {
 fun FileImage(file: File, modifier: Modifier = Modifier, scale: ContentScale = ContentScale.Crop) {
     var image by remember(file.path) { mutableStateOf(thumbs.get(file.path)) }
     LaunchedEffect(file.path) {
+        // A migrated exact preview may still be rendering after startup.
+        // Keep this row alive until its versioned file is atomically written.
+        while (!file.exists()) delay(250)
         if (image == null) {
             image = withContext(Dispatchers.IO) {
                 BitmapFactory.decodeFile(file.path)?.asImageBitmap()?.also { thumbs.put(file.path, it) }

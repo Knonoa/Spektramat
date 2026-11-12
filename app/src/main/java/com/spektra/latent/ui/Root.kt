@@ -121,7 +121,7 @@ fun Root(app: LatentApp, incoming: List<Uri>, onIncomingTaken: () -> Unit) {
                             frameId = current.frameId,
                             onBack = { screen = leave(current) },
                             // a print is ordered and made in the background: the darkroom stays where it is
-                            onDevelop = { look, edge -> s.library.frame(current.frameId)?.let { s.prints.order(it, look, edge) } },
+                            onDevelop = { look, edge, format -> s.library.frame(current.frameId)?.let { s.prints.order(it, look, edge, format) } },
                         )
                     }
                 }

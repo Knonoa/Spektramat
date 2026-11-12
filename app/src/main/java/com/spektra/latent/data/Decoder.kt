@@ -21,8 +21,8 @@ import kotlin.math.roundToInt
  *
  * RAW goes to the engine, which develops it from the sensor data. Everything
  * else (JPEG, HEIF, PNG, WebP) is decoded by Android, which converts the
- * file's own colour profile to sRGB and applies its orientation; the engine
- * then linearises it. The two routes never mix: a RAW is not shown through its
+ * file's own ICC profile to extended linear sRGB without an 8-bit intermediate,
+ * and applies its orientation. The two routes never mix: a RAW is not shown through its
  * embedded JPEG unless the engine itself says that is all it could read.
  */
 object Decoder {
@@ -74,7 +74,7 @@ object Decoder {
             try {
                 ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
                     decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                    decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.SRGB))
+                    decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.LINEAR_EXTENDED_SRGB))
                     val long = max(info.size.width, info.size.height)
                     if (maxEdge in 1 until long) {
                         val k = maxEdge.toFloat() / long
@@ -89,8 +89,18 @@ object Decoder {
         } else {
             legacy(file, maxEdge)
         } ?: return null
-        if (decoded.config == Bitmap.Config.ARGB_8888) return decoded
-        return decoded.copy(Bitmap.Config.ARGB_8888, false).also { decoded.recycle() }
+        val target = ColorSpace.get(ColorSpace.Named.LINEAR_EXTENDED_SRGB)
+        val linear = if (decoded.config == Bitmap.Config.RGBA_F16) decoded else
+            decoded.copy(Bitmap.Config.RGBA_F16, true).also { decoded.recycle() }
+        if (linear.colorSpace != target) {
+            // Canvas performs the profile conversion into an extended linear
+            // destination, retaining negative and above-white float channels.
+            val converted = Bitmap.createBitmap(linear.width, linear.height, Bitmap.Config.RGBA_F16, true, target)
+            android.graphics.Canvas(converted).drawBitmap(linear, 0f, 0f, null)
+            linear.recycle()
+            return converted
+        }
+        return linear
     }
 
     /** Android 8: no ImageDecoder. BitmapFactory with the EXIF orientation applied by hand. */
@@ -103,7 +113,8 @@ object Decoder {
         if (maxEdge > 0) while (long / (sample * 2) >= maxEdge) sample *= 2
         val o = BitmapFactory.Options().apply {
             inSampleSize = sample
-            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inPreferredConfig = Bitmap.Config.RGBA_F16
+            inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.LINEAR_EXTENDED_SRGB)
         }
         var bitmap = BitmapFactory.decodeFile(file.path, o) ?: return null
         val m = Matrix()

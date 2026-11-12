@@ -2,6 +2,7 @@ package com.spektra.latent.model
 
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.engine.PrintOrder
+import com.spektra.latent.engine.PhotoModel
 import com.spektra.latent.engine.Rebate
 import org.json.JSONArray
 import org.json.JSONObject
@@ -58,6 +59,7 @@ data class Look(
     val gradingBalance: Float = 0f,                  // -100..100
     val gradingBlending: Float = 50f,                // 0..100
     val vignette: Float = 0f,                        // -100..100, negative darkens the corners
+    val model: PhotoModel = PhotoModel(),
 ) {
     /** Slides are not printed: the film itself is the picture. A negative can be looked at the same way. */
     val scanFilm: Boolean get() = scan || FilmEngine.catalog.film(film)?.positive == true
@@ -91,12 +93,17 @@ data class Look(
     /** The part of this look a recipe keeps: everything [withRecipe] hands on, on an untouched scene. */
     fun asRecipe(): Look = Look().withRecipe(this).copy(date = date.copy(manual = ""))
 
-    /** The `Grade` block of latent.glsl. [meteredEv] is the picture's own metering, taken once at import. */
+    /** Video grade with a fixed exposure; photographs use [photoGrade] and native metering. */
     fun grade(meteredEv: Float): FloatArray {
+        return photoGrade().also { it[3] = 2f.pow(exposure + meteredEv) }
+    }
+
+    /** Scene corrections before reference auto-exposure and camera EV. */
+    fun photoGrade(): FloatArray {
         val wb = FilmEngine.whiteBalance(temperature, tint)
         return floatArrayOf(
             wb[0], wb[1], wb[2],
-            2f.pow(exposure + meteredEv),
+            1f,
             2f.pow(contrast / 100f * 0.6f),
             highlights / 100f, shadows / 100f, whites / 100f, blacks / 100f,
             vibrance / 100f,
@@ -114,12 +121,17 @@ data class Look(
     fun order(seed: Long, shooting: Shooting? = null, frameSeed: Int = 1, number: Int = 0) = PrintOrder(
         film = film, paper = paper, scanFilm = scanFilm,
         printExposure = printGain, yShift = filterY, mShift = filterM,
-        interLayer = interLayer > 0f, interLayerAmount = interLayer / 100f,
+        // spektrafilm's DIR amount is defined on [0, 1.5].  Older Android
+        // recipes allowed 200%; clamp at the contract boundary so every
+        // caller (including a restored recipe) gets the same native value.
+        interLayer = interLayer > 0f, interLayerAmount = (interLayer / 100f).coerceIn(0f, 1.5f),
         halation = halation > 0f, halationAmount = halation / 100f,
         grain = grain > 0f, grainAmount = grain / 100f,
         glare = glare > 0f, glareAmount = glare / 100f,
         filmFormatMm = Format.of(format).longMm, seed = seed,
         rebate = rebate(shooting, frameSeed, number),
+        exposureEv = exposure,
+        model = model,
     )
 
     /** The same look on another stock; the paper stays when it suits the new stock, else the stock's own. */
@@ -131,6 +143,8 @@ data class Look(
     }
 
     fun toJson(): JSONObject = JSONObject()
+        .put("algorithmSchema", PhotoModel.SCHEMA).put("referenceCommit", PhotoModel.REFERENCE_COMMIT)
+        .put("model", model.toJson())
         .put("exposure", exposure.toDouble()).put("temperature", temperature.toDouble()).put("tint", tint.toDouble())
         .put("contrast", contrast.toDouble()).put("highlights", highlights.toDouble()).put("shadows", shadows.toDouble())
         .put("whites", whites.toDouble()).put("blacks", blacks.toDouble())
@@ -194,7 +208,7 @@ data class Look(
                 edge = Edge.fromJson(o.optJSONObject("edge")),
                 date = DateBack.fromJson(o.optJSONObject("date")),
                 halation = f("halation", 100f, 0f, 200f), grain = f("grain", 100f, 0f, 200f),
-                interLayer = f("interLayer", 100f, 0f, 200f),
+                interLayer = f("interLayer", 100f, 0f, 150f),
                 paper = paper,
                 printExposure = f("printExposure", 0f, -3f, 3f),
                 filterY = f("filterY", 0f, -60f, 60f), filterM = f("filterM", 0f, -60f, 60f),
@@ -208,6 +222,7 @@ data class Look(
                 gradingBalance = f("gradingBalance", 0f, -100f, 100f),
                 gradingBlending = f("gradingBlending", 50f, 0f, 100f),
                 vignette = f("vignette", 0f, -100f, 100f),
+                model = PhotoModel.fromJson(o.optJSONObject("model")),
             )
         }
     }
@@ -260,7 +275,7 @@ object Controls {
     val film = listOf(
         Control("halation", "光晕", 0f, 200f, 1f, 100f, 50f, ::percent, { it.halation }) { l, v -> l.copy(halation = v) },
         Control("grain", "颗粒", 0f, 200f, 1f, 100f, 50f, ::percent, { it.grain }) { l, v -> l.copy(grain = v) },
-        Control("interLayer", "层间效应", 0f, 200f, 1f, 100f, 50f, ::percent, { it.interLayer }) { l, v -> l.copy(interLayer = v) },
+        Control("interLayer", "层间效应", 0f, 150f, 1f, 100f, 50f, ::percent, { it.interLayer }) { l, v -> l.copy(interLayer = v.coerceIn(0f, 150f)) },
     )
 
     val print = listOf(

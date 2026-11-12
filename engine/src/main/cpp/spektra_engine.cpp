@@ -1,9 +1,8 @@
 // spektra_engine.cpp -- the pipeline. See spektra_engine.hpp.
 //
-// Every stage below names the reference function it ports. Where the engine
-// approximates (the enlarger/scanner spectral integrals are sampled into 3D
-// LUTs; the stochastic samplers use their own RNG) the parity harness in
-// tools/parity measures the cost.
+// Every stage below names the reference function it ports.  Photo renders use
+// the reference's direct 81-sample spectral integrals.  The LUT builders remain
+// available for the separate low-latency video path and for table baking.
 #include "spektra_engine.hpp"
 
 #include <algorithm>
@@ -16,6 +15,13 @@
 
 #include "filters.hpp"
 #include "parallel.hpp"
+#include "print_morph.hpp"
+#include "color_reference.hpp"
+#include "diffusion.hpp"
+#include "auto_exposure.hpp"
+#include "color_spaces.hpp"
+#include "output_gamut.hpp"
+#include "spectral_input.hpp"
 
 namespace spk {
 
@@ -174,7 +180,15 @@ inline void tc_lookup(const float* lut, int L, double qx, double qy, double out[
 }
 
 // rgb_to_raw_hanatos2025 for one linear-sRGB pixel (no exposure comp)
-inline void rgb_to_raw(const FilmProfile& f, const double rgb[3], double raw[3]) {
+inline void rgb_to_raw(const FilmProfile& f, const double rgb[3], double raw[3], const SpectralInputSetup* setup = nullptr) {
+    if (setup && setup->use_mallett) {
+        for (int c = 0; c < 3; c++) {
+            raw[c] = 0;
+            for (int a = 0; a < 3; a++) raw[c] += setup->mallett[c * 3 + a] * rgb[a];
+            if (!std::isfinite(raw[c])) raw[c] = 0;
+        }
+        return;
+    }
     const float* M = f.rgb_to_xyz;
     const double X = M[0] * rgb[0] + M[1] * rgb[1] + M[2] * rgb[2];
     const double Y = M[3] * rgb[0] + M[4] * rgb[1] + M[5] * rgb[2];
@@ -187,7 +201,8 @@ inline void rgb_to_raw(const FilmProfile& f, const double rgb[3], double raw[3])
     const double qx = std::min(std::max(omx * omx, 0.0), 1.0);
     const double qy = std::min(std::max(y / std::max(omx, 1e-10), 0.0), 1.0);
     if (!std::isfinite(b)) b = 0.0;
-    tc_lookup(f.tc_lut.data(), f.tc_size, qx, qy, raw);
+    tc_lookup(setup && !setup->tc.empty() ? setup->tc.data() : f.tc_lut.data(),
+              setup ? setup->size : f.tc_size, qx, qy, raw);
     raw[0] *= b;
     raw[1] *= b;
     raw[2] *= b;
@@ -310,6 +325,7 @@ struct Lut3 {
 // ---------------------------------------------------------------------------
 struct FilmSetup {
     const FilmProfile* film = nullptr;
+    SpectralInputSetup spectral;
     Interp1 dev[3];           // log_raw -> normalised density
     Interp1 dev0[3];          // log_raw_0 -> density (pre-DIR curves)
     Interp1 dev_raw[3];       // log_raw -> raw density (develop_simple for midgray)
@@ -325,7 +341,7 @@ struct FilmSetup {
     float halation_sigma_um[3] = {65, 65, 65};
 };
 
-void dir_couplers_matrix(const FilmProfile& f, double amount, double M[9]) {
+void dir_couplers_matrix(const FilmProfile& f, double amount, double M[9], const DirParams& p = DirParams{}) {
     // params_builder._apply_film_specifics
     double self_[3], rg[2], gr[2], br[2];
     auto set = [&](std::initializer_list<double> s, std::initializer_list<double> a,
@@ -341,7 +357,16 @@ void dir_couplers_matrix(const FilmProfile& f, double amount, double M[9]) {
         set({0.108, 0.072, 0.054}, {0.108, 0.054}, {0.072, 0.054}, {0.054, 0.054});
     else if (f.stock == "fujifilm_provia_100f")
         set({0.156, 0.104, 0.078}, {0.156, 0.078}, {0.104, 0.078}, {0.078, 0.078});
-    // compute_dir_couplers_matrix (inhibition_samelayer = inhibition_interlayer = 1)
+    if (!p.use_stock_defaults) {
+        std::copy(p.gamma_samelayer, p.gamma_samelayer + 3, self_);
+        std::copy(p.gamma_r_to_gb, p.gamma_r_to_gb + 2, rg);
+        std::copy(p.gamma_g_to_rb, p.gamma_g_to_rb + 2, gr);
+        std::copy(p.gamma_b_to_rg, p.gamma_b_to_rg + 2, br);
+    }
+    for (double& v : self_) v *= p.inhibition_samelayer;
+    for (double& v : rg) v *= p.inhibition_interlayer;
+    for (double& v : gr) v *= p.inhibition_interlayer;
+    for (double& v : br) v *= p.inhibition_interlayer;
     for (int i = 0; i < 9; i++) M[i] = 0.0;
     M[0] = self_[0]; M[4] = self_[1]; M[8] = self_[2];
     M[1] = rg[0]; M[2] = rg[1];
@@ -350,9 +375,11 @@ void dir_couplers_matrix(const FilmProfile& f, double amount, double M[9]) {
     for (int i = 0; i < 9; i++) M[i] *= amount;
 }
 
-std::unique_ptr<FilmSetup> build_film_setup(const FilmProfile& f, const RenderParams& p) {
+std::unique_ptr<FilmSetup> build_film_setup(const FilmProfile& f, const RenderParams& p, const EngineData* data = nullptr) {
     auto fs = std::make_unique<FilmSetup>();
     fs->film = &f;
+    if (data) fs->spectral = build_spectral_input(*data, f, p.spectral_input);
+    else fs->spectral.size = f.tc_size;
     const int n = (int)f.log_exposure.size();
     std::vector<float> le(f.log_exposure.begin(), f.log_exposure.end());
 
@@ -382,7 +409,7 @@ std::unique_ptr<FilmSetup> build_film_setup(const FilmProfile& f, const RenderPa
 
     // DIR couplers: compute_density_curves_before_dir_couplers
     fs->dir_active = p.dir_couplers_active;
-    dir_couplers_matrix(f, p.dir_couplers_amount, fs->M);
+    dir_couplers_matrix(f, p.dir_couplers_amount, fs->M, p.dir);
     for (int recv = 0; recv < 3; recv++) {
         std::vector<float> le0(n), yv(n), dc0(n);
         for (int e = 0; e < n; e++) {
@@ -432,6 +459,10 @@ std::unique_ptr<FilmSetup> build_film_setup(const FilmProfile& f, const RenderPa
     for (int c = 0; c < 3; c++) {
         fs->halation_strength[c] = kStrength[ah][c];
         fs->halation_sigma_um[c] = f.cine ? 50.0f : 65.0f;
+        if (!p.halation.use_stock_defaults) {
+            fs->halation_strength[c] = p.halation.strength[c];
+            fs->halation_sigma_um[c] = p.halation.first_sigma_um[c];
+        }
     }
     return fs;
 }
@@ -441,12 +472,20 @@ std::unique_ptr<FilmSetup> build_film_setup(const FilmProfile& f, const RenderPa
 // ---------------------------------------------------------------------------
 struct PrintSetup {
     Lut3 enlarger;            // film cmy -> log10 raw print (incl. midgray factor)
+    Spectral film_sp;
+    std::vector<double> illu;
+    std::vector<double> sens;
     Interp1 develop[3];       // paper log exposure -> density (fitted curves)
     double factor = 1.0;
+    double preflash[3] = {};
 };
 
 struct ScanSetup {
     Lut3 scanner;             // cmy -> log10 XYZ
+    Spectral sp;
+    std::vector<double> illu;
+    std::vector<double> cmfs;
+    double norm = 1.0;
     double illu_xyz[3] = {0, 0, 0};
     float xyz_to_rgb[9] = {};
 };
@@ -469,14 +508,14 @@ std::vector<double> filtered_enlarger(const EngineData& d, const Illuminant& src
 // FilmingStage._simple_rgb_to_density_spectral -> printing._exposure_factor
 double midgray_exposure_factor(const EngineData& d, const FilmSetup& fs, const Spectral& film_sp,
                                const std::vector<double>& illu, const std::vector<double>& sens,
-                               double ev) {
+                               double ev, double gamma = 1.0) {
     const FilmProfile& f = *fs.film;
     const double g = kMidgray * std::pow(2.0, ev);
     const double rgb[3] = {g, g, g};
     double raw[3];
-    rgb_to_raw(f, rgb, raw);
+    rgb_to_raw(f, rgb, raw, &fs.spectral);
     double dens[3];
-    for (int c = 0; c < 3; c++) dens[c] = fs.dev_raw[c]((float)std::log10(raw[c] + kEps));
+    for (int c = 0; c < 3; c++) dens[c] = fs.dev_raw[c]((float)(std::log10(raw[c] + kEps) * gamma));
     const int nwl = d.n_wl;
     double out[3] = {0, 0, 0};
     for (int wl = 0; wl < nwl; wl++) {
@@ -495,40 +534,60 @@ std::unique_ptr<PrintSetup> build_print_setup(const EngineData& d, const FilmSet
                                               const PaperProfile& paper, const RenderParams& p) {
     auto ps = std::make_unique<PrintSetup>();
     const FilmProfile& f = *fs.film;
-    const Illuminant* src = d.illuminant("TH-KG3");
-    if (!src) throw std::string("TH-KG3 illuminant missing");
+    const Illuminant* src = d.illuminant(p.enlarger_illuminant);
+    if (!src) throw std::string("enlarger illuminant missing: " + p.enlarger_illuminant);
 
     // apply_database_neutral_print_filters (defaults c=0, m=65, y=55)
-    float neutral[3] = {0.0f, 65.0f, 55.0f};
-    d.neutral_filter(paper.stock, "TH-KG3", f.stock, neutral);
+    float neutral[3];
+    std::copy(p.neutral_cmy, p.neutral_cmy + 3, neutral);
+    if (p.neutral_filters_from_database) d.neutral_filter(paper.stock, p.enlarger_illuminant, f.stock, neutral);
     const double cc[3] = {neutral[0], neutral[1] + p.m_filter_shift, neutral[2] + p.y_filter_shift};
     const std::vector<double> illu = filtered_enlarger(d, *src, cc);
     std::vector<double> sens(paper.sensitivity.begin(), paper.sensitivity.end());
 
     Spectral film_sp;
     film_sp.set(f.channel_density, f.base_density, d.n_wl);
+    ps->film_sp = film_sp;
+    ps->illu = illu;
+    ps->sens = sens;
 
-    // _compute_exposure_factor_midgray, normalize_print_exposure = True
-    if (p.print_exposure_compensation)
-        ps->factor = midgray_exposure_factor(d, fs, film_sp, illu, sens, p.exposure_ev);
-    else
-        ps->factor = midgray_exposure_factor(d, fs, film_sp, illu, sens, 0.0);
+    const double mid = midgray_exposure_factor(d, fs, film_sp, illu, sens, 0.0, p.density_curve_gamma);
+    const double comp = p.print_exposure_compensation ?
+        midgray_exposure_factor(d, fs, film_sp, illu, sens, p.exposure_ev, p.density_curve_gamma) : 1.0;
+    ps->factor = p.normalize_print_exposure ? (p.print_exposure_compensation ? comp : mid) :
+                 (p.print_exposure_compensation ? comp / mid : 1.0);
+    if (p.preflash_exposure > 0.0f) {
+        const double flash_cc[3] = {neutral[0], neutral[1] + p.preflash_m_shift, neutral[2] + p.preflash_y_shift};
+        const auto flash = filtered_enlarger(d, *src, flash_cc);
+        for (int wl = 0; wl < d.n_wl; wl++) {
+            if (!std::isfinite(f.base_density[wl])) continue;
+            const double light = flash[wl] * std::pow(10.0, -(double)f.base_density[wl]) * p.preflash_exposure;
+            for (int c = 0; c < 3; c++) ps->preflash[c] += light * sens[(size_t)wl * 3 + c];
+        }
+    }
 
     float lo[3], hi[3];
     for (int c = 0; c < 3; c++) {
-        lo[c] = (float)-kGrainDensityMin[c];
+        lo[c] = -p.grain.density_min[c];
         hi[c] = fs.dmax_raw[c];
     }
-    build_spectral_lut(film_sp, illu, sens, ps->factor, lo, hi, kLut3dN, ps->enlarger.data);
+    if (p.use_spectral_lut) {
+        build_spectral_lut(film_sp, illu, sens, ps->factor, lo, hi, kLut3dN, ps->enlarger.data);
+        if (p.preflash_exposure > 0) {
+            for (size_t i = 0; i < ps->enlarger.data.size(); i++)
+                ps->enlarger.data[i] = (float)std::log10(std::pow(10.0, ps->enlarger.data[i]) + ps->preflash[i % 3]);
+        }
+    }
     std::copy(lo, lo + 3, ps->enlarger.lo);
     std::copy(hi, hi + 3, ps->enlarger.hi);
     ps->enlarger.finalize();
 
+    const auto curves = print_morph_curves(paper, p.print_morph);
     std::vector<float> le(paper.log_exposure.begin(), paper.log_exposure.end());
     const int n = (int)le.size();
     for (int c = 0; c < 3; c++) {
         std::vector<float> y(n);
-        for (int e = 0; e < n; e++) y[e] = paper.print_curves[(size_t)e * 3 + c];
+        for (int e = 0; e < n; e++) y[e] = curves[(size_t)e * 3 + c];
         ps->develop[c].set(le, y);
     }
     return ps;
@@ -537,7 +596,7 @@ std::unique_ptr<PrintSetup> build_print_setup(const EngineData& d, const FilmSet
 std::unique_ptr<ScanSetup> build_scan_setup(const EngineData& d, const std::vector<float>& cd,
                                             const std::vector<float>& base, int view_illu,
                                             const float lo[3], const float hi[3],
-                                            const float xyz_to_rgb[9]) {
+                                            const float xyz_to_rgb[9], bool build_lut = true) {
     auto ss = std::make_unique<ScanSetup>();
     const Illuminant& il = d.illuminants[(size_t)view_illu];
     const int nwl = d.n_wl;
@@ -549,7 +608,11 @@ std::unique_ptr<ScanSetup> build_scan_setup(const EngineData& d, const std::vect
         for (int c = 0; c < 3; c++) ss->illu_xyz[c] += illu[wl] * cmfs[(size_t)wl * 3 + c] / norm;
     Spectral sp;
     sp.set(cd, base, nwl);
-    build_spectral_lut(sp, illu, cmfs, 1.0 / norm, lo, hi, kLut3dN, ss->scanner.data);
+    ss->sp = sp;
+    ss->illu = illu;
+    ss->cmfs = cmfs;
+    ss->norm = norm;
+    if (build_lut) build_spectral_lut(sp, illu, cmfs, 1.0 / norm, lo, hi, kLut3dN, ss->scanner.data);
     std::copy(lo, lo + 3, ss->scanner.lo);
     std::copy(hi, hi + 3, ss->scanner.hi);
     ss->scanner.finalize();
@@ -574,6 +637,32 @@ struct RNG {
         : rng(seed ^ (stream * 0x9E3779B97F4A7C15ull) ^ ((row + 1) * 0xD1B54A32D192ED03ull)) {}
 };
 
+template <size_t N> void key_array(std::ostream& k, const float (&a)[N]) {
+    for (float v : a) k << ',' << v;
+}
+
+std::string film_model_key(const RenderParams& p) {
+    std::ostringstream k;
+    k.precision(std::numeric_limits<float>::max_digits10);
+    k << p.film_stock << '|' << p.dir_couplers_active << ',' << p.dir_couplers_amount << ','
+      << p.density_curve_gamma << ',' << p.dir.use_stock_defaults << ','
+      << p.dir.inhibition_samelayer << ',' << p.dir.inhibition_interlayer;
+    key_array(k, p.dir.gamma_samelayer); key_array(k, p.dir.gamma_r_to_gb);
+    key_array(k, p.dir.gamma_g_to_rb); key_array(k, p.dir.gamma_b_to_rg);
+    k << '|' << p.halation.use_stock_defaults;
+    key_array(k, p.halation.strength); key_array(k, p.halation.first_sigma_um);
+    const auto& si = p.spectral_input;
+    k << '|' << si.method << ',' << si.adaptation_window << ',' << si.adaptation_surface << ','
+      << si.spectral_gaussian_blur << ',' << si.gamut_active << ',' << si.gamut_algorithm;
+    key_array(k, si.filter_uv); key_array(k, si.filter_ir); key_array(k, si.gamut_knee);
+    return k.str();
+}
+
+void diffusion_key(std::ostream& k, const DiffusionParams& d) {
+    k << '|' << d.active << ',' << d.family << ',' << d.strength << ',' << d.spatial_scale << ',' << d.halo_warmth;
+    key_array(k, d.intensity); key_array(k, d.size);
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -590,6 +679,7 @@ struct Engine::Impl {
     std::unique_ptr<PrintSetup> print;
     std::string scan_key;
     std::unique_ptr<ScanSetup> scan;
+    ColorReference color_reference;
 
     // the developed negative (Tap.CMY_FILM) of the last render
     std::string neg_key;
@@ -599,6 +689,38 @@ struct Engine::Impl {
     Impl(const EngineData& d, const Cam16Setup& c, const FontLib* f) : data(d), cam16(c), fonts(f) {}
 
     void setup(const RenderParams& p) {
+        auto finite_range = [](float value, float lo, float hi, const char* name) {
+            if (!std::isfinite(value) || value < lo || value > hi)
+                throw std::string("invalid parameter: ") + name;
+        };
+        finite_range(p.dir_couplers_amount, 0, 1.5f, "dir_couplers.amount (0..1.5)");
+        finite_range(p.density_curve_gamma, 1e-4f, 100, "density_curve_gamma");
+        finite_range(p.halation.boost_ev, 0, 20, "halation.boost_ev");
+        finite_range(p.halation.boost_range, 0, 1, "halation.boost_range");
+        finite_range(p.halation.protect_ev, 0, 100, "halation.protect_ev");
+        finite_range(p.halation.bounce_decay, 0, 1, "halation.bounce_decay");
+        if (p.halation.n_bounces < 0 || p.halation.n_bounces > 64)
+            throw std::string("invalid parameter: halation.n_bounces");
+        if (p.grain.n_sub_layers < 1 || p.grain.n_sub_layers > 64)
+            throw std::string("invalid parameter: grain.n_sub_layers");
+        finite_range(p.grain.particle_area_um2, 1e-8f, 1e6f, "grain.particle_area_um2");
+        finite_range(p.scanner_black_level, 0, 1, "scanner.black_level");
+        finite_range(p.scanner_white_level, 0, 1, "scanner.white_level");
+        auto validate_knee = [&](const float* knee) {
+            finite_range(knee[0], 0, .999999f, "gamut knee threshold");
+            finite_range(knee[1], knee[0] + 1e-6f, 100, "gamut knee limit");
+            finite_range(knee[2], 1e-5f, 100, "gamut knee power");
+        };
+        validate_knee(p.output_gamut.knee);
+        validate_knee(p.output_gamut.lightness_knee);
+        if (p.scanner_black_correction && p.scanner_white_correction &&
+            p.scanner_black_level >= p.scanner_white_level)
+            throw std::string("scanner black level must be below white level");
+        for (int c = 0; c < 3; c++) {
+            finite_range(p.grain.particle_scale[c], 1e-8f, 1e6f, "grain.particle_scale");
+            finite_range(p.grain.particle_scale_layers[c], 1e-8f, 1e6f, "grain.particle_scale_layers");
+            finite_range(p.grain.uniformity[c], 0, 1, "grain.uniformity");
+        }
         const FilmProfile* f = data.film(p.film_stock);
         if (!f) throw std::string("unknown film stock: " + p.film_stock);
         const bool scan_film = p.scan_film;
@@ -607,80 +729,125 @@ struct Engine::Impl {
             paper = data.paper(p.print_stock);
             if (!paper) throw std::string("unknown print stock: " + p.print_stock);
         }
-        char buf[512];
-        std::snprintf(buf, sizeof buf, "%s|%d|%.6f", f->stock.c_str(), (int)p.dir_couplers_active,
-                      p.dir_couplers_amount);
-        if (film_key != buf || !film) {
-            film = build_film_setup(*f, p);
-            film_key = buf;
+        const std::string fk = film_model_key(p);
+        if (film_key != fk || !film) {
+            film = build_film_setup(*f, p, &data);
+            film_key = fk;
             print.reset();
             print_key.clear();
         }
         if (!scan_film) {
-            std::snprintf(buf, sizeof buf, "%s|%s|%.6f|%.6f|%d|%.6f", f->stock.c_str(),
-                          paper->stock.c_str(), p.y_filter_shift, p.m_filter_shift,
-                          (int)p.print_exposure_compensation,
-                          p.print_exposure_compensation ? p.exposure_ev : 0.0f);
-            if (print_key != buf || !print) {
+            std::ostringstream pk;
+            pk.precision(std::numeric_limits<float>::max_digits10);
+            pk << fk << '|' << paper->stock << '|' << p.y_filter_shift << ',' << p.m_filter_shift << ','
+               << p.print_exposure_compensation << ',' << p.exposure_ev << ',' << p.normalize_print_exposure << ','
+               << p.enlarger_illuminant << ',' << p.neutral_filters_from_database << ',' << p.use_spectral_lut << ','
+               << p.preflash_exposure << ',' << p.preflash_y_shift << ',' << p.preflash_m_shift;
+            key_array(pk, p.neutral_cmy); key_array(pk, p.grain.density_min);
+            pk << '|' << p.print_morph.active << ',' << p.print_morph.gamma << ',' << p.print_morph.gamma_fast
+               << ',' << p.print_morph.gamma_slow << ',' << p.print_morph.developer_exhaustion;
+            key_array(pk, p.print_morph.gamma_rgb);
+            if (print_key != pk.str() || !print) {
                 print = build_print_setup(data, *film, *paper, p);
-                print_key = buf;
+                print_key = pk.str();
             }
-            std::snprintf(buf, sizeof buf, "paper|%s", paper->stock.c_str());
-            if (scan_key != buf || !scan) {
+            const std::string sk = "paper|" + paper->stock + '|' + std::to_string(p.use_spectral_lut);
+            if (scan_key != sk || !scan) {
                 scan = build_scan_setup(data, paper->channel_density, paper->base_density,
                                         paper->view_illu, paper->dc_min, paper->dc_max,
-                                        paper->xyz_to_rgb);
-                scan_key = buf;
+                                        paper->xyz_to_rgb, p.use_spectral_lut);
+                scan_key = sk;
             }
         } else {
-            std::snprintf(buf, sizeof buf, "film|%s", f->stock.c_str());
-            if (scan_key != buf || !scan) {
+            std::ostringstream sk;
+            sk << "film|" << f->stock << '|' << p.use_spectral_lut;
+            key_array(sk, p.grain.density_min);
+            if (scan_key != sk.str() || !scan) {
                 float lo[3], hi[3];
                 for (int c = 0; c < 3; c++) {
-                    lo[c] = (float)-kGrainDensityMin[c];
+                    lo[c] = -p.grain.density_min[c];
                     hi[c] = film->dmax_raw[c];
                 }
                 scan = build_scan_setup(data, f->channel_density, f->base_density, f->view_illu,
-                                        lo, hi, f->xyz_to_rgb_view);
-                scan_key = buf;
+                                        lo, hi, f->xyz_to_rgb_view, p.use_spectral_lut);
+                scan_key = sk.str();
             }
         }
     }
 
-    // -- preprocess: utils/autoexposure.measure_autoexposure_ev, center_weighted,
-    //    on ResizingService.small_preview (nearest neighbour, long edge 256)
-    double auto_exposure_ev(const float* rgb, int w, int h) const {
-        int sw = w, sh = h;
-        const int long_edge = std::max(w, h);
-        if (long_edge > 256) {
-            const double s = 256.0 / long_edge;
-            sw = std::max(1, (int)std::lround(w * s));
-            sh = std::max(1, (int)std::lround(h * s));
-        }
-        const double ms = std::max(sw, sh);
-        const double sigma = 0.2;
-        double sumY = 0, sumW = 0;
-        const float* lw = data.luminance_weights;
-        for (int y = 0; y < sh; y++) {
-            int sy = sh == h ? y : (int)std::floor((y + 0.5) * h / sh);
-            sy = std::min(std::max(sy, 0), h - 1);
-            const double ny = ((double)y / sh - 0.5) * (sh / ms);
-            for (int x = 0; x < sw; x++) {
-                int sx = sw == w ? x : (int)std::floor((x + 0.5) * w / sw);
-                sx = std::min(std::max(sx, 0), w - 1);
-                const double nx = ((double)x / sw - 0.5) * (sw / ms);
-                const double wgt = std::exp(-(nx * nx + ny * ny) / (2 * sigma * sigma));
-                const float* px = rgb + ((size_t)sy * w + sx) * 3;
-                const double Y = lw[0] * px[0] + lw[1] * px[1] + lw[2] * px[2];
-                sumY += Y * wgt;
-                sumW += wgt;
+    void setup_color_reference(const RenderParams& p) {
+        color_reference = ColorReference{};
+        if (!(p.scanner_black_correction || p.scanner_white_correction)) return;
+        const auto& f = *film->film;
+        if (p.scan_film && !f.positive) return;
+        const auto* paper = p.scan_film ? nullptr : data.paper(p.print_stock);
+        if (paper && paper->positive) return;
+        auto scan_y = [&](const double density[3]) {
+            double Y = 0;
+            for (size_t wl = 0; wl < scan->illu.size(); wl++) {
+                if (!scan->sp.valid[wl]) continue;
+                double ds = scan->sp.base[wl];
+                for (int c = 0; c < 3; c++) ds += density[c] * scan->sp.cd[wl * 3 + c];
+                Y += scan->illu[wl] * std::pow(10.0, -ds) * scan->cmfs[wl * 3 + 1];
+            }
+            return std::fmax(Y / scan->norm, 0.0) + kEps;
+        };
+        double black[3], white[3];
+        if (p.scan_film) {
+            for (int c = 0; c < 3; c++) { black[c] = film->dmax_raw[c]; white[c] = 0; }
+        } else {
+            if (paper->density_curves.empty()) throw std::string("black/white correction requires v3 profile data");
+            double raw[2][3] = {};
+            for (size_t wl = 0; wl < print->illu.size(); wl++) {
+                if (!print->film_sp.valid[wl]) continue;
+                double ds[2] = {print->film_sp.base[wl], print->film_sp.base[wl]};
+                for (int c = 0; c < 3; c++) {
+                    ds[0] -= p.grain.density_min[c] * print->film_sp.cd[wl * 3 + c];
+                    ds[1] += film->dmax_raw[c] * print->film_sp.cd[wl * 3 + c];
+                }
+                for (int b = 0; b < 2; b++) {
+                    const double light = print->illu[wl] * std::pow(10.0, -ds[b]);
+                    for (int c = 0; c < 3; c++) raw[b][c] += light * print->sens[wl * 3 + c];
+                }
+            }
+            for (int c = 0; c < 3; c++) {
+                std::vector<float> dc(paper->log_exposure.size());
+                for (size_t e = 0; e < dc.size(); e++) dc[e] = paper->density_curves[e * 3 + c];
+                Interp1 curve; curve.set(paper->log_exposure, std::move(dc));
+                black[c] = curve((float)std::log10(std::fmax(raw[0][c] * print->factor + print->preflash[c], 0.0) + kEps));
+                white[c] = curve((float)std::log10(std::fmax(raw[1][c] * print->factor + print->preflash[c], 0.0) + kEps));
             }
         }
-        const double exposure = (sumW > 0 ? sumY / sumW : 0.0) / kMidgray;
-        const double ev = -std::log2(exposure);
-        return std::isfinite(ev) ? ev : 0.0;
+        color_reference.calibrate(scan_y(black), scan_y(white), p);
+        const auto& curves = p.scan_film ? f.density_curves : paper->density_curves;
+        const auto& le = p.scan_film ? f.log_exposure : paper->log_exposure;
+        const auto& base = p.scan_film ? f.base_density : paper->base_density;
+        double base_mean = 0; size_t count = 0;
+        for (float v : base) if (std::isfinite(v)) { base_mean += v; count++; }
+        base_mean /= std::max(count, (size_t)1);
+        std::vector<float> density(le.size());
+        for (size_t e = 0; e < le.size(); e++) {
+            double mean = 0; int n = 0;
+            for (int c = 0; c < 3; c++) if (std::isfinite(curves[e * 3 + c])) { mean += curves[e * 3 + c]; n++; }
+            density[e] = (float)((p.scan_film ? -1 : 1) * mean / std::max(n, 1));
+        }
+        Interp1 inverse; inverse.set(std::move(density), le);
+        const double normal = -std::log10(kMidgray) - base_mean;
+        const double adjusted = -std::log10(color_reference.midgray) - base_mean;
+        const double a = inverse((float)(p.scan_film ? -normal : normal));
+        const double b = inverse((float)(p.scan_film ? -adjusted : adjusted));
+        // The positive-film reference negates the inverse exposure then
+        // reciprocates its gain; these signs cancel.
+        const double gain = std::pow(10.0, b - a);
+        if (p.scan_film) color_reference.filming_exposure = gain;
+        else color_reference.printing_exposure = gain;
     }
 
+    // Shared reference metering for native processing and Android snapshots.
+    double auto_exposure_ev(const float* rgb, int w, int h,
+                            const std::string& method = "center_weighted") const {
+        return measure_exposure_ev(rgb, w, h, data.luminance_weights, method);
+    }
     // -- filming.expose ---------------------------------------------------
     // `L`: the Film Edge canvas (valid) or the bare frame's identity layout
     // for the date alone; null for neither. `ch` holds the output's planes:
@@ -691,9 +858,12 @@ struct Engine::Impl {
         const bool canvas = L && L->valid;
         // metering and the boost are statistics of the frame: taken before
         // the canvas exists (RFC-032 §27)
-        const double ae = p.auto_exposure ? auto_exposure_ev(rgb, fw, fh) : 0.0;
+        const double ae = (p.auto_exposure && !p.exposure_preapplied) ? auto_exposure_ev(rgb, fw, fh, p.auto_exposure_method) : 0.0;
         const double gain = std::pow(2.0, ae);
-        const double comp = std::pow(2.0, (double)p.exposure_ev);
+        // Photos meter the current scene and apply manual camera EV here.
+        // Explicit pregraded callers can bypass both gains; their manual EV
+        // remains available to the independent print normalization step.
+        const double comp = p.exposure_preapplied ? 1.0 : std::pow(2.0, (double)p.exposure_ev);
         std::vector<float> frame_planes[3];
         float* frame[3] = {ch[0], ch[1], ch[2]};
         if (canvas) {
@@ -705,7 +875,7 @@ struct Engine::Impl {
                     const size_t i = (size_t)y * fw + x;
                     const double in[3] = {rgb[i * 3] * gain, rgb[i * 3 + 1] * gain, rgb[i * 3 + 2] * gain};
                     double raw[3];
-                    rgb_to_raw(f, in, raw);
+                    rgb_to_raw(f, in, raw, &film->spectral);
                     frame[0][i] = (float)(raw[0] * comp);
                     frame[1][i] = (float)(raw[1] * comp);
                     frame[2][i] = (float)(raw[2] * comp);
@@ -713,6 +883,32 @@ struct Engine::Impl {
             }
         });
         check_cancel(cancel);
+        // boost_highlights() uses a frame-wide raw maximum, before any
+        // propagation or film-edge pixels are introduced.
+        if (p.halation.boost_ev > 0) {
+            double maximum = 0.0;
+            for (int c = 0; c < 3; c++)
+                for (size_t i = 0; i < (size_t)fw * fh; i++) maximum = std::max(maximum, (double)frame[c][i]);
+            const double x0 = std::min(kMidgray * std::pow(2.0, p.halation.protect_ev), maximum);
+            if (maximum > x0) {
+                const double a = std::pow(28.0, 1.0 - p.halation.boost_range);
+                const double dxmax = a * (1.0 - x0 / maximum);
+                const double denom = std::expm1(dxmax) - dxmax;
+                const double scale = maximum * std::expm1(std::log(2.0) * p.halation.boost_ev) / denom;
+                for (int c = 0; c < 3; c++)
+                    for (size_t i = 0; i < (size_t)fw * fh; i++) {
+                        const double v = frame[c][i];
+                        if (v > x0) {
+                            const double dx = a * (v - x0) / maximum;
+                            frame[c][i] = (float)(v + scale * (std::expm1(dx) - dx));
+                        }
+                    }
+            }
+        }
+        apply_diffusion(frame, fw, fh, pixel_um, p.camera_diffusion);
+        if (p.camera_lens_blur_um > 0)
+            for (int c = 0; c < 3; c++)
+                gaussian_blur_plane(frame[c], frame[c], fw, fh, p.camera_lens_blur_um / pixel_um);
         int w = fw, h = fh;
         if (canvas) {
             // the film around the frame, built on the raw exposure, before halation
@@ -735,11 +931,12 @@ struct Engine::Impl {
             Plane core(np), tail(np), tmp1, tmp2;
             const double s = p.scatter_amount;
             for (int c = 0; c < 3 && s > 0; c++) {
-                const double sc = kScatterCoreUm[c] / pixel_um, st = kScatterTailUm[c] / pixel_um;
+                const double sc = p.halation.scatter_core_um[c] * p.halation.scatter_spatial_scale / pixel_um;
+                const double st = p.halation.scatter_tail_um[c] * p.halation.scatter_spatial_scale / pixel_um;
                 if (!(sc > 0 || st > 0)) continue;
                 gaussian_blur_plane(ch[c], core.data(), w, h, std::max(sc, 1e-6));
                 exponential_blur_plane(ch[c], tail.data(), w, h, std::max(st, 1e-6), tmp1.v, tmp2.v);
-                const float ws = (float)kScatterTailW[c];
+                const float ws = p.halation.scatter_tail_weight[c];
                 const float sf = (float)s;
                 float* d = ch[c];
                 for (size_t i = 0; i < np; i++) {
@@ -748,21 +945,22 @@ struct Engine::Impl {
                 }
                 check_cancel(cancel);
             }
-            double decay[kHalationBounces], dsum = 0;
-            for (int k = 0; k < kHalationBounces; k++) { decay[k] = std::pow(kHalationDecay, k); dsum += decay[k]; }
+            std::vector<double> decay((size_t)std::max(p.halation.n_bounces, 0));
+            double dsum = 0;
+            for (size_t k = 0; k < decay.size(); k++) { decay[k] = std::pow(p.halation.bounce_decay, (int)k); dsum += decay[k]; }
             Plane acc(np), blur(np);
             for (int c = 0; c < 3; c++) {
                 const double a_tot = film->halation_strength[c] * (double)p.halation_amount;
-                const double sigma = film->halation_sigma_um[c] / pixel_um;
-                if (!(a_tot > 0) || !(sigma > 0)) continue;
+                const double sigma = film->halation_sigma_um[c] * p.halation.halation_spatial_scale / pixel_um;
+                if (!(a_tot > 0) || !(sigma > 0) || !(dsum > 0)) continue;
                 std::fill(acc.v.begin(), acc.v.end(), 0.0f);
-                for (int k = 0; k < kHalationBounces; k++) {
+                for (size_t k = 0; k < decay.size(); k++) {
                     const double sk = std::max(sigma * std::sqrt((double)(k + 1)), 1e-6);
                     gaussian_blur_plane(ch[c], blur.data(), w, h, sk);
                     const float wk = (float)(decay[k] / dsum);
                     for (size_t i = 0; i < np; i++) acc.v[i] += wk * blur.v[i];
                 }
-                const float a = (float)a_tot, norm = (float)(1.0 / (1.0 + a_tot));
+                const float a = (float)a_tot, norm = p.halation.renormalize ? (float)(1.0 / (1.0 + a_tot)) : 1.0f;
                 float* d = ch[c];
                 for (size_t i = 0; i < np; i++) d[i] = (d[i] + a * acc.v[i]) * norm;  // renormalize
                 check_cancel(cancel);
@@ -772,7 +970,7 @@ struct Engine::Impl {
         parallel_for(h, [&](int y0, int y1) {
             for (int c = 0; c < 3; c++)
                 for (size_t i = (size_t)y0 * w; i < (size_t)y1 * w; i++)
-                    ch[c][i] = (float)std::log10(std::max((double)ch[c][i], 0.0) + kEps);
+                    ch[c][i] = (float)std::log10(std::fmax((double)ch[c][i] * color_reference.filming_exposure, 0.0) + kEps);
         });
         if (tap) tap("log_e_film", ch[0], ch[1], ch[2], w, h);
     }
@@ -788,16 +986,16 @@ struct Engine::Impl {
         parallel_for(h, [&](int y0, int y1) {
             for (int c = 0; c < 3; c++) {
                 const Interp1& ip = film->dev[c];
-                for (size_t i = (size_t)y0 * w; i < (size_t)y1 * w; i++) dens[c][i] = ip(ch[c][i]);
+                for (size_t i = (size_t)y0 * w; i < (size_t)y1 * w; i++) dens[c][i] = ip(ch[c][i] * p.density_curve_gamma);
             }
         });
         check_cancel(cancel);
 
         if (film->dir_active) {
             // compute_exposure_correction_dir_couplers
-            const double sg = kDirDiffusionUm / pixel_um;
-            const double st = kDirTailUm / pixel_um;
-            const float wt = (float)kDirTailWeight;
+            const double sg = p.dir.diffusion_um / pixel_um;
+            const double st = p.dir.tail_um / pixel_um;
+            const float wt = p.dir.tail_weight;
             static const double fits[3][2] = {{0.1633, 0.5360}, {0.6496, 1.5236}, {0.1870, 2.7684}};
             Plane corr(np), acc(np), tmp(np);
             for (int recv = 0; recv < 3; recv++) {
@@ -832,7 +1030,7 @@ struct Engine::Impl {
             parallel_for(h, [&](int y0, int y1) {
                 for (int c = 0; c < 3; c++) {
                     const Interp1& ip = film->dev0[c];
-                    for (size_t i = (size_t)y0 * w; i < (size_t)y1 * w; i++) dens[c][i] = ip(ch[c][i]);
+                    for (size_t i = (size_t)y0 * w; i < (size_t)y1 * w; i++) dens[c][i] = ip(ch[c][i] * p.density_curve_gamma);
                 }
             });
         }
@@ -863,23 +1061,23 @@ struct Engine::Impl {
                 for (int l = 0; l < 3; l++) {
                     const double frac = dmax_total > 0 ? film->dmax_layers[l][c] / dmax_total : 0.0;
                     if (!(frac > 0)) continue;
-                    const double dmin_l = frac * kGrainDensityMin[c];
+                    const double dmin_l = frac * p.grain.density_min[c];
                     const double dmax_l = film->dmax_layers[l][c] + dmin_l;
                     const double n_part = pixel_area * frac /
-                                          (kGrainParticleArea * kGrainScale[c] * kGrainScaleLayers[l]);
+                                          (p.grain.particle_area_um2 * p.grain.particle_scale[c] * p.grain.particle_scale_layers[l]);
                     const Interp1& lip = film->layer[c][l];
                     const bool neg_axis = film->layer_neg_axis;
                     particle_layer(w, h, [&](size_t i) {
                         const float d = clean.v[i];
                         return (double)lip(neg_axis ? -d : d) + dmin_l;
-                    }, dmax_l, n_part, kGrainUniformity[c], kGrainBlurDyeClouds,
+                    }, dmax_l, n_part, p.grain.uniformity[c], p.grain.blur_dye_clouds_um,
                        seed, (uint64_t)(c * 10 + l), layer_out.v);
                     for (size_t i = 0; i < np; i++) acc.v[i] += layer_out.v[i];
                     check_cancel(cancel);
                 }
                 // add_micro_structure
-                const double micro_blur = kGrainMicroBlurUm / pixel_um;
-                const double micro_sigma = kGrainMicroSigmaNm * 0.001 / pixel_um;
+                const double micro_blur = p.grain.micro_blur_um / pixel_um;
+                const double micro_sigma = p.grain.micro_sigma_nm * 0.001 / pixel_um;
                 if (micro_sigma > 0.05) {
                     Plane clump(np);
                     parallel_for(h, [&](int y0, int y1) {
@@ -892,16 +1090,22 @@ struct Engine::Impl {
                     if (micro_blur > 0.4) gaussian_blur_plane(clump.data(), clump.data(), w, h, micro_blur);
                     for (size_t i = 0; i < np; i++) acc.v[i] *= clump.v[i];
                 }
-                for (size_t i = 0; i < np; i++) acc.v[i] -= (float)kGrainDensityMin[c];
+                for (size_t i = 0; i < np; i++) acc.v[i] -= p.grain.density_min[c];
             } else {
-                // apply_grain_to_density (single layer, n_sub_layers = 1)
-                const double dmax = film->dmax_norm[c] + kGrainDensityMin[c];
-                const double n_part = pixel_area / (kGrainParticleArea * kGrainScale[c]);
-                particle_layer(w, h, [&](size_t i) { return (double)clean.v[i] + kGrainDensityMin[c]; },
-                               dmax, n_part, kGrainUniformity[c], 0.0, seed, (uint64_t)c, acc.v);
-                for (size_t i = 0; i < np; i++) acc.v[i] -= (float)kGrainDensityMin[c];
+                // n_sub_layers applies to the single-emulsion path, separately
+                // from the three measured density-curve emulsion layers.
+                const int count = p.grain.n_sub_layers;
+                const double dmax = film->dmax_norm[c] + p.grain.density_min[c];
+                const double n_part = pixel_area / (p.grain.particle_area_um2 * p.grain.particle_scale[c] * count);
+                for (int l = 0; l < count; l++) {
+                    particle_layer(w, h, [&](size_t i) { return (double)clean.v[i] + p.grain.density_min[c]; },
+                                   dmax, n_part, p.grain.uniformity[c], 0.0, seed, (uint64_t)(c + l * 10), layer_out.v);
+                    for (size_t i = 0; i < np; i++) acc.v[i] += layer_out.v[i] / count;
+                }
+                for (size_t i = 0; i < np; i++) acc.v[i] -= p.grain.density_min[c];
             }
-            if (kGrainBlur > 0) gaussian_blur_plane(acc.data(), acc.data(), w, h, kGrainBlur);
+            if (p.grain.blur > (p.grain_sublayers ? 0.0f : 0.4f))
+                gaussian_blur_plane(acc.data(), acc.data(), w, h, p.grain.blur);
             // SpektraLab grain amount: in + amount * (grained - in)
             for (size_t i = 0; i < np; i++) ch[c][i] = clean.v[i] + amount * (acc.v[i] - clean.v[i]);
             check_cancel(cancel);
@@ -933,18 +1137,38 @@ struct Engine::Impl {
     }
 
     // -- printing.expose + printing.develop ------------------------------------
-    void print_stage(int w, int h, const RenderParams& p, float* ch[3], const TapFn& tap) {
-        const double pe = p.print_exposure;
+    void print_stage(int w, int h, const RenderParams& p, double pixel_um, float* ch[3], const TapFn& tap) {
+        const double pe = p.print_exposure * color_reference.printing_exposure;
         parallel_for(h, [&](int y0, int y1) {
             float o[3];
             for (size_t i = (size_t)y0 * w; i < (size_t)y1 * w; i++) {
-                print->enlarger.sample(ch[0][i], ch[1][i], ch[2][i], o);
+                if (p.use_spectral_lut) {
+                    print->enlarger.sample(ch[0][i], ch[1][i], ch[2][i], o);
+                } else {
+                    const double d0 = ch[0][i], d1 = ch[1][i], d2 = ch[2][i];
+                    double acc[3] = {0.0, 0.0, 0.0};
+                    for (size_t wl = 0; wl < print->illu.size(); wl++) {
+                        if (!print->film_sp.valid[wl]) continue;
+                        const size_t q = wl * 3;
+                        const double ds = print->film_sp.base[wl] + d0 * print->film_sp.cd[q] +
+                                          d1 * print->film_sp.cd[q + 1] + d2 * print->film_sp.cd[q + 2];
+                        const double light = print->illu[wl] * std::pow(10.0, -ds);
+                        acc[0] += light * print->sens[q];
+                        acc[1] += light * print->sens[q + 1];
+                        acc[2] += light * print->sens[q + 2];
+                    }
+                    for (int c = 0; c < 3; c++)
+                        o[c] = (float)std::log10(std::max(acc[c] * print->factor + print->preflash[c], 0.0) + kEps);
+                }
                 for (int c = 0; c < 3; c++) {
                     const double raw = std::pow(10.0, (double)o[c]) * pe;
-                    ch[c][i] = (float)std::log10(std::max(raw, 0.0) + kEps);
+                    ch[c][i] = (float)std::max(raw, 0.0);
                 }
             }
         });
+        apply_diffusion(ch, w, h, pixel_um, p.enlarger_diffusion);
+        for (int c = 0; c < 3; c++)
+            for (size_t i = 0; i < (size_t)w * h; i++) ch[c][i] = (float)std::log10((double)ch[c][i] + kEps);
         if (tap) tap("log_e_print", ch[0], ch[1], ch[2], w, h);
         parallel_for(h, [&](int y0, int y1) {
             for (int c = 0; c < 3; c++) {
@@ -961,7 +1185,7 @@ struct Engine::Impl {
         const size_t np = (size_t)w * h;
         // model/glare.add_glare (print scans only)
         std::vector<float> glare;
-        const double percent = kGlarePercent * (double)p.glare_amount;
+        const double percent = p.glare_percent * (double)p.glare_amount;
         if (!p.scan_film && p.glare_active && percent > 0) {
             glare.resize(np);
             const uint64_t seed = p.seed ^ 0x676C617265ull;
@@ -970,45 +1194,73 @@ struct Engine::Impl {
                     RNG r(seed, 7, (uint64_t)y);
                     for (int x = 0; x < w; x++)
                         glare[(size_t)y * w + x] =
-                            (float)r.rng.lognormal_mean_std(percent, kGlareRoughness * percent);
+                            (float)r.rng.lognormal_mean_std(percent, p.glare_roughness * percent);
                 }
             });
-            gaussian_blur_plane(glare.data(), glare.data(), w, h, kGlareBlur);
+            gaussian_blur_plane(glare.data(), glare.data(), w, h, p.glare_blur);
             for (auto& g : glare) g /= 100.0f;
         }
-        const float* M = scan->xyz_to_rgb;
         const double* ixyz = scan->illu_xyz;
+        const auto& cs = output_color_space(p.output_color_space);
+        const Mat3 output_matrix = scan_output_matrix(cs, ixyz);
+        const auto& output_view = output_cam16(p.output_color_space);
+        const auto* polar = p.output_gamut.algorithm == "oklch" || p.output_gamut.algorithm == "oklrab" ||
+                            p.output_gamut.algorithm == "jzazbz" ?
+            &output_detail::polar_setup(p.output_gamut.algorithm, cs) : nullptr;
         parallel_for(h, [&](int y0, int y1) {
             float lx[3];
             for (size_t i = (size_t)y0 * w; i < (size_t)y1 * w; i++) {
-                scan->scanner.sample(ch[0][i], ch[1][i], ch[2][i], lx);
-                double X = std::pow(10.0, (double)lx[0]);
-                double Y = std::pow(10.0, (double)lx[1]);
-                double Z = std::pow(10.0, (double)lx[2]);
+                double X, Y, Z;
+                if (p.use_spectral_lut) {
+                    scan->scanner.sample(ch[0][i], ch[1][i], ch[2][i], lx);
+                    X = std::pow(10.0, (double)lx[0]);
+                    Y = std::pow(10.0, (double)lx[1]);
+                    Z = std::pow(10.0, (double)lx[2]);
+                } else {
+                    const double d0 = ch[0][i], d1 = ch[1][i], d2 = ch[2][i];
+                    double acc[3] = {0.0, 0.0, 0.0};
+                    for (size_t wl = 0; wl < scan->illu.size(); wl++) {
+                        if (!scan->sp.valid[wl]) continue;
+                        const size_t q = wl * 3;
+                        const double ds = scan->sp.base[wl] + d0 * scan->sp.cd[q] +
+                                          d1 * scan->sp.cd[q + 1] + d2 * scan->sp.cd[q + 2];
+                        const double light = scan->illu[wl] * std::pow(10.0, -ds);
+                        acc[0] += light * scan->cmfs[q];
+                        acc[1] += light * scan->cmfs[q + 1];
+                        acc[2] += light * scan->cmfs[q + 2];
+                    }
+                    // cmy_to_log_xyz -> 10 ** log_xyz in the reference:
+                    // fmax also maps a NaN integral to zero before the floor.
+                    X = std::fmax(acc[0] / scan->norm, 0.0) + kEps;
+                    Y = std::fmax(acc[1] / scan->norm, 0.0) + kEps;
+                    Z = std::fmax(acc[2] / scan->norm, 0.0) + kEps;
+                }
+                color_reference.apply(X, Y, Z);
                 if (!glare.empty()) {
                     const double g = glare[i];
                     X += g * ixyz[0];
                     Y += g * ixyz[1];
                     Z += g * ixyz[2];
                 }
-                double rgb[3] = {
-                    M[0] * X + M[1] * Y + M[2] * Z,
-                    M[3] * X + M[4] * Y + M[5] * Z,
-                    M[6] * X + M[7] * Y + M[8] * Z,
-                };
-                compress_output_pixel(cam16, rgb);   // utils/gamut_compression.compress_rgb
+                const double xyz[3] = {X, Y, Z};
+                double rgb[3];
+                output_matrix.apply(xyz, rgb);
+                compress_output_gamut(cs, output_view, polar, rgb, p.output_gamut);
                 ch[0][i] = (float)rgb[0];
                 ch[1][i] = (float)rgb[1];
                 ch[2][i] = (float)rgb[2];
             }
         });
         check_cancel(cancel);
+        if (p.scanner_lens_blur > 0)
+            for (int c = 0; c < 3; c++)
+                gaussian_blur_plane(ch[c], ch[c], w, h, p.scanner_lens_blur);
         // scanner unsharp mask: rgb + amount * (rgb - gauss(rgb, sigma))
-        if (p.unsharp_mask) {
+        if (p.unsharp_mask && p.unsharp_sigma > 0 && p.unsharp_amount > 0) {
             Plane blur(np);
             for (int c = 0; c < 3; c++) {
-                gaussian_blur_plane(ch[c], blur.data(), w, h, kUnsharpSigma);
-                const float a = (float)kUnsharpAmount;
+                gaussian_blur_plane(ch[c], blur.data(), w, h, p.unsharp_sigma);
+                const float a = p.unsharp_amount;
                 for (size_t i = 0; i < np; i++) ch[c][i] = ch[c][i] + a * (ch[c][i] - blur.v[i]);
             }
         }
@@ -1022,7 +1274,7 @@ struct Engine::Impl {
             for (size_t i = (size_t)y0 * w; i < (size_t)y1 * w; i++) {
                 uint8_t* o = out + i * 4;
                 for (int c = 0; c < 3; c++) {
-                    float v = srgb_encode(ch[c][i]);
+                    float v = p.output_cctf_encoding ? output_encode(ch[c][i], p.output_color_space) : ch[c][i];
                     v = std::min(std::max(v, 0.0f), 1.0f);
                     o[c] = (uint8_t)std::lround(v * 255.0f);
                 }
@@ -1033,11 +1285,27 @@ struct Engine::Impl {
 
     std::string film_side_key(int64_t source_id, int w, int h, const RenderParams& p) const {
         std::ostringstream k;
+        k.precision(std::numeric_limits<float>::max_digits10);
         k << source_id << '|' << w << 'x' << h << '|' << p.film_stock << '|' << p.exposure_ev << '|'
-          << p.auto_exposure << '|' << p.film_format_mm << '|' << p.halation_active << '|'
+          << p.auto_exposure << '|' << p.auto_exposure_method << '|' << p.exposure_preapplied << '|' << p.film_format_mm << '|' << p.halation_active << '|'
           << p.halation_amount << '|' << p.scatter_amount << '|' << p.dir_couplers_active << '|'
           << p.dir_couplers_amount << '|' << p.grain_active << '|' << p.grain_sublayers << '|'
           << p.grain_amount << '|' << p.seed;
+        k << '|' << film_model_key(p) << '|' << p.camera_lens_blur_um << ','
+          << p.halation.scatter_spatial_scale << ',' << p.halation.halation_spatial_scale << ','
+          << p.halation.boost_ev << ',' << p.halation.boost_range << ',' << p.halation.protect_ev << ','
+          << p.halation.n_bounces << ',' << p.halation.bounce_decay << ',' << p.halation.renormalize << ','
+          << p.dir.diffusion_um << ',' << p.dir.tail_um << ',' << p.dir.tail_weight << ','
+          << p.grain.particle_area_um2 << ',' << p.grain.blur << ',' << p.grain.blur_dye_clouds_um << ','
+          << p.grain.micro_blur_um << ',' << p.grain.micro_sigma_nm << ',' << p.grain.n_sub_layers;
+        key_array(k, p.halation.scatter_core_um); key_array(k, p.halation.scatter_tail_um);
+        key_array(k, p.halation.scatter_tail_weight); key_array(k, p.grain.particle_scale);
+        key_array(k, p.grain.particle_scale_layers); key_array(k, p.grain.density_min);
+        key_array(k, p.grain.uniformity);
+        diffusion_key(k, p.camera_diffusion);
+        if (p.scan_film)
+            k << "|bw:" << p.scanner_black_correction << ',' << p.scanner_white_correction << ','
+              << p.scanner_black_level << ',' << p.scanner_white_level;
         // Film Edge and the date back are exposure on the negative
         const OverscanParams& o = p.overscan;
         if (o.active)
@@ -1053,8 +1321,9 @@ struct Engine::Impl {
     }
 
     void render(const float* rgb_in, int w_in, int h_in, int64_t source_id, const RenderParams& p,
-                uint8_t* out, const CancelFn* cancel, const TapFn& tap) {
+                uint8_t* out, const CancelFn* cancel, const TapFn& tap, bool allow_cached_negative_with_tap) {
         setup(p);
+        setup_color_reference(p);
         check_cancel(cancel);
         // Film Edge: the frame is the gate, so the picture is cut to its shape
         // (centred) before anything is measured on it.
@@ -1100,9 +1369,11 @@ struct Engine::Impl {
         std::vector<float> planes[3];
         float* ch[3];
         const std::string key = film_side_key(source_id, w_in, h_in, p);
-        const bool reuse = source_id >= 0 && !tap && key == neg_key && neg[0].size() == np;
+        const bool reuse = source_id >= 0 && (!tap || allow_cached_negative_with_tap) &&
+                           key == neg_key && neg[0].size() == np;
         if (reuse) {
             for (int c = 0; c < 3; c++) planes[c] = neg[c];
+            if (tap) tap("cmy_film", planes[0].data(), planes[1].data(), planes[2].data(), W, H);
         } else {
             neg_key.clear();
             for (auto& n : neg) std::vector<float>().swap(n);
@@ -1123,7 +1394,7 @@ struct Engine::Impl {
         }
         for (int c = 0; c < 3; c++) ch[c] = planes[c].data();
         check_cancel(cancel);
-        if (!p.scan_film) print_stage(W, H, p, ch, tap);
+        if (!p.scan_film) print_stage(W, H, p, pixel_um, ch, tap);
         check_cancel(cancel);
         scan_stage(W, H, p, ch, out, cancel, tap, ov ? &L : nullptr);
     }
@@ -1158,10 +1429,10 @@ void Engine::drop_caches() {
 
 bool Engine::render(const float* rgb_linear, int w, int h, int64_t source_id,
                     const RenderParams& params, uint8_t* rgba_out, std::string& error,
-                    const CancelFn* cancel, const TapFn& tap) {
+                    const CancelFn* cancel, const TapFn& tap, bool allow_cached_negative_with_tap) {
     if (w <= 0 || h <= 0) { error = "empty image"; return false; }
     try {
-        impl_->render(rgb_linear, w, h, source_id, params, rgba_out, cancel, tap);
+        impl_->render(rgb_linear, w, h, source_id, params, rgba_out, cancel, tap, allow_cached_negative_with_tap);
         return true;
     } catch (const Cancelled&) {
         error = "cancelled";

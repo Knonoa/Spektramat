@@ -10,9 +10,7 @@ import android.provider.OpenableColumns
 import com.spektra.latent.Journal
 import androidx.exifinterface.media.ExifInterface
 import com.spektra.latent.engine.FilmEngine
-import com.spektra.latent.engine.FilmTables
 import com.spektra.latent.engine.LinearImage
-import com.spektra.latent.engine.PrintOrder
 import com.spektra.latent.engine.Rebate
 import com.spektra.latent.model.Look
 import com.spektra.latent.model.Shooting
@@ -47,7 +45,7 @@ data class Frame(
     val shutter: Double,
     val aperture: Double,
     val focal: Double,
-    /** spektrafilm's centre-weighted metering of the picture, measured once at import. */
+    /** Import-time metering metadata. Full photo renders meter their current input independently. */
     val meteredEv: Float,
     val look: Look,
     /** The thumbnail on disk shows the look as of this revision. */
@@ -92,11 +90,53 @@ class Library(context: Context) {
     val importFailures: StateFlow<List<String>> = _importFailures
     fun clearImportFailures() { _importFailures.value = emptyList() }
 
-    // one set of tables for thumbnails; bake() only redoes what a different look needs
-    private val thumbTables = FilmTables()
-    private val thumbLock = Any()
 
-    suspend fun load() = withContext(Dispatchers.IO) { publish() }
+    suspend fun load() = withContext(Dispatchers.IO) {
+        migrateLooks()
+        publish()
+    }
+
+    /** Rebuild old-algorithm previews after the catalogue is available. */
+    suspend fun refreshPreviews() = withContext(Dispatchers.IO) {
+        // Cached previews produced by the old LUT engine cannot stand in for
+        // exact photo results after an algorithm/data update.
+        for (frame in _rolls.value.flatMap { it.frames }) {
+            if (frame.thumb.exists()) continue
+            try {
+                Decoder.decode(frame.file, THUMB_EDGE, frame.look.lensShading, frame.look.aspect).use {
+                    renderThumb(it, frame.look, frame.thumb, rebateOf(frame, frame.look))
+                }
+            } catch (e: Exception) {
+                Journal.w(TAG, "thumbnail migration failed for ${frame.name}", e)
+            }
+        }
+    }
+
+    private fun thumbFile(file: File, revision: Int) =
+        File(thumbs, "${file.nameWithoutExtension}_${revision}_${FilmEngine.renderCacheKey}.jpg")
+
+    private fun migrateLooks() {
+        val changes = ArrayList<Pair<Long, Look>>()
+        db.rawQuery("SELECT id, look FROM frame", null).use { cursor ->
+            while (cursor.moveToNext()) {
+                val json = try { org.json.JSONObject(cursor.getString(1)) } catch (_: Exception) { continue }
+                if (json.optInt("algorithmSchema") >= com.spektra.latent.engine.PhotoModel.SCHEMA) continue
+                val look = Look.fromJson(json.toString())
+                if (json.optDouble("interLayer", 100.0) > 150.0)
+                    Journal.i(TAG, "migrated frame ${cursor.getLong(0)} DIR to reference maximum 1.5")
+                changes += cursor.getLong(0) to look
+            }
+        }
+        if (changes.isEmpty()) return
+        db.beginTransaction()
+        try {
+            for ((id, look) in changes) db.update("frame", ContentValues().apply {
+                put("look", look.toJson().toString())
+            }, "id=?", arrayOf(id.toString()))
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+        Journal.i(TAG, "migrated ${changes.size} photo recipes to reference algorithm schema ${com.spektra.latent.engine.PhotoModel.SCHEMA}")
+    }
 
     fun frame(id: Long): Frame? = _rolls.value.firstNotNullOfOrNull { r -> r.frames.firstOrNull { it.id == id } }
 
@@ -120,10 +160,10 @@ class Library(context: Context) {
                     }
                     val size = Decoder.size(copy) ?: throw IOException("不是可以读取的图片")
                     val look = Look()
-                    val thumb = File(thumbs, copy.nameWithoutExtension + "_1.jpg")
+                    val thumb = thumbFile(copy, 1)
                     val metered = Decoder.decode(copy, THUMB_EDGE, look.lensShading).use { small ->
                         val ev = small.meterEv()
-                        renderThumb(small, look, ev, size.max(), thumb)
+                        renderThumb(small, look, thumb)
                         ev
                     }
                     if (rollId < 0) rollId = newRoll()
@@ -145,9 +185,9 @@ class Library(context: Context) {
      * is the app's own temporary file) and filed on today's camera roll with
      * the look of the film that was in the camera.
      *
-     * [metered] is the exposure correction to file it with: 0 for a JPEG, whose
-     * brightness the camera and the person have already decided; null to
-     * measure it, as for any RAW.
+     * [metered] is capture metadata: 0 for an already exposed JPEG, or null to
+     * measure the source. Rendering applies the recipe's reference metering
+     * to the current input rather than multiplying this stored measurement.
      */
     suspend fun addCapture(
         shot: File, name: String, look: Look, metered: Float?, roll: Long? = null, keepOnFailure: Boolean = false,
@@ -159,7 +199,7 @@ class Library(context: Context) {
                 shot.delete()
             }
             val size = Decoder.size(copy) ?: throw IOException("拍下的文件读不出来")
-            // metered on the whole picture, whatever shape it will be cut to
+            // Keep source metering as metadata, independently of the recipe's render metering.
             val ev = metered ?: Decoder.decode(copy, THUMB_EDGE, look.lensShading).use { it.meterEv() }
             val id = insertFrame(roll ?: cameraRoll(), copy, name, size, ev, look)
             publish()
@@ -168,7 +208,7 @@ class Library(context: Context) {
             // The photograph is filed by now; a thumbnail that fails does not unfile it.
             try {
                 Decoder.decode(copy, THUMB_EDGE, look.lensShading, look.aspect).use {
-                    renderThumb(it, look, ev, look.frameSize(size[0], size[1]).max(), filed.thumb, rebateOf(filed, look))
+                    renderThumb(it, look, filed.thumb, rebateOf(filed, look))
                 }
             } catch (e: Exception) {
                 Journal.w(TAG, "no thumbnail for $name", e)
@@ -193,10 +233,10 @@ class Library(context: Context) {
         val f = frame(frameId) ?: return@withContext
         if (f.look == look) return@withContext
         val revision = f.revision + 1
-        val thumb = File(thumbs, f.file.nameWithoutExtension + "_$revision.jpg")
+        val thumb = thumbFile(f.file, revision)
         try {
             Decoder.decode(f.file, THUMB_EDGE, look.lensShading, look.aspect).use {
-                renderThumb(it, look, f.meteredEv, look.frameSize(f.width, f.height).max(), thumb, rebateOf(f, look))
+                renderThumb(it, look, thumb, rebateOf(f, look))
             }
         } catch (e: Exception) {
             Journal.w(TAG, "thumbnail failed for ${f.name}", e)
@@ -251,8 +291,14 @@ class Library(context: Context) {
 
     // ---- thumbnails
 
-    private fun renderThumb(small: LinearImage, look: Look, meteredEv: Float, printLongEdge: Int, out: File, rebate: Rebate = Rebate()) {
-        val bitmap = picture(small, look, meteredEv, printLongEdge, rebate)
+    private fun renderThumb(small: LinearImage, look: Look, out: File, rebate: Rebate = Rebate()) {
+        val rendered = picture(small, look, rebate)
+        val bitmap = if (rendered.config == Bitmap.Config.ARGB_8888 &&
+            rendered.colorSpace == android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB)) rendered else
+            Bitmap.createBitmap(rendered.width, rendered.height, Bitmap.Config.ARGB_8888).also {
+                android.graphics.Canvas(it).drawBitmap(rendered, 0f, 0f, null)
+                rendered.recycle()
+            }
         try {
             val tmp = File(out.parentFile, out.name + ".tmp")
             tmp.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
@@ -262,38 +308,11 @@ class Library(context: Context) {
         }
     }
 
-    /**
-     * [small] as [look] prints it, at [small]'s own size. With the film's edge
-     * or a date on the negative the picture comes from the engine itself (the
-     * edge is its work), otherwise from the tables. [small] is used up: do not
-     * read it afterwards.
-     */
-    private fun picture(small: LinearImage, look: Look, meteredEv: Float, printLongEdge: Int, rebate: Rebate): Bitmap {
-        if (!rebate.idle) {
-            return FilmEngine.develop(
-                small, look.grade(meteredEv),
-                look.order(seed = 1L).let { o ->
-                    PrintOrder(
-                        o.film, o.paper, o.scanFilm, o.printExposure, o.yShift, o.mShift, o.interLayer, o.interLayerAmount,
-                        o.halation, o.halationAmount, o.scatter, o.grain, o.grainAmount, o.glare, o.glareAmount, o.sharpen,
-                        o.filmFormatMm, o.seed, rebate,
-                    )
-                },
-                look.finish(), look.finishTable(), lane = FilmEngine.THUMB,
-            )
-        }
-        return synchronized(thumbLock) {
-            thumbTables.bake(
-                look.film, look.paper, look.scanFilm,
-                interLayer = look.interLayer > 0f, interLayerAmount = look.interLayer / 100f,
-                yShift = look.filterY, mShift = look.filterM,
-            )
-            val amount = look.grain / 100f
-            val shownUm = look.formatUm / max(small.width, small.height)
-            val printUm = look.formatUm / max(printLongEdge, 1)
-            val film = thumbTables.filmBlock(1f, look.printGain, amount, FilmEngine.grainScale(amount, shownUm, printUm), 1f)
-            FilmEngine.renderFast(small, thumbTables, look.grade(meteredEv), film, look.finish(), look.finishTable())
-        }
+    /** Every photo surface, including thumbnails, uses the full spectral engine. */
+    private fun picture(small: LinearImage, look: Look, rebate: Rebate): Bitmap {
+        val base = look.order(seed = 1L)
+        val order = if (rebate.idle) base else base.copy(rebate = rebate)
+        return FilmEngine.develop(small, look.photoGrade(), order, look.finish(), look.finishTable(), lane = FilmEngine.THUMB)
     }
 
     /** What [frame] puts on its negative besides the picture, with [look]. */
@@ -306,11 +325,11 @@ class Library(context: Context) {
      * disk; null when the original cannot be read.
      */
     suspend fun proxy(frame: Frame, longEdge: Int = PROXY_EDGE): File? = withContext(Dispatchers.IO) {
-        val file = File(thumbs, frame.file.nameWithoutExtension + "_${frame.revision}_p$longEdge.jpg")
+        val file = File(thumbs, "${frame.file.nameWithoutExtension}_${frame.revision}_p${longEdge}_${FilmEngine.renderCacheKey}.jpg")
         if (file.exists()) return@withContext file
         try {
             Decoder.decode(frame.file, longEdge, frame.look.lensShading, frame.look.aspect).use {
-                renderThumb(it, frame.look, frame.meteredEv, frame.look.frameSize(frame.width, frame.height).max(), file, rebateOf(frame, frame.look))
+                renderThumb(it, frame.look, file, rebateOf(frame, frame.look))
             }
             file
         } catch (e: Exception) {
@@ -380,7 +399,7 @@ class Library(context: Context) {
                     camera = c.getString(9), lens = c.getString(10), iso = c.getInt(11), shutter = c.getDouble(12),
                     aperture = c.getDouble(13), focal = c.getDouble(14), meteredEv = c.getFloat(15),
                     look = Look.fromJson(c.getString(16)),
-                    thumb = File(thumbs, file.nameWithoutExtension + "_$revision.jpg"), revision = revision,
+                    thumb = thumbFile(file, revision), revision = revision,
                 )
             }
         }

@@ -148,15 +148,17 @@ fun bindUnit(unit: Int, target: Int, texture: Int) {
  */
 class FinishGpu {
     private var texture = 0
-    private var uploaded: FloatArray? = null
+    private var uploaded: Look? = null
+    private var block = FloatArray(Finishing.BLOCK_FLOATS)
     private val staging = ByteBuffer.allocateDirect(Finishing.TABLE_FLOATS * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
 
     /** Binds the table, uploading it when it is not the one already there, and sets `u_finish` on [program] (in use). */
     fun bind(program: Program, look: Look) {
-        val table = look.finishTable()
         if (texture == 0) texture = newTexture(GLES30.GL_TEXTURE_2D, GLES30.GL_NEAREST)
         bindUnit(Tex.FINISH, GLES30.GL_TEXTURE_2D, texture)
-        if (table !== uploaded) {
+        if (look != uploaded) {
+            val table = look.finishTable()
+            block = look.finish()
             staging.clear()
             staging.put(table)
             staging.position(0)
@@ -164,10 +166,10 @@ class FinishGpu {
             GLES30.glTexImage2D(
                 GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGB32F, Finishing.SAMPLES, 2, 0, GLES30.GL_RGB, GLES30.GL_FLOAT, staging,
             )
-            uploaded = table
+            uploaded = look
         }
         program.setInt("u_finish_table", Tex.FINISH)
-        program.setStruct("u_finish", ShaderText.FINISH, look.finish())
+        program.setStruct("u_finish", ShaderText.FINISH, block)
     }
 
     fun release() {

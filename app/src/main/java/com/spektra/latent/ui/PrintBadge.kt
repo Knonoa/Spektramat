@@ -326,7 +326,8 @@ private fun Details(job: PrintJob, desk: PrintDesk, close: () -> Unit) {
                 Pill("分享", {
                     context.startActivity(
                         Intent.createChooser(
-                            Intent(Intent.ACTION_SEND).setType("image/jpeg").putExtra(Intent.EXTRA_STREAM, state.printed.uri)
+                            Intent(Intent.ACTION_SEND).setType(context.contentResolver.getType(state.printed.uri) ?: "image/*")
+                                .putExtra(Intent.EXTRA_STREAM, state.printed.uri)
                                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
                             null,
                         ),

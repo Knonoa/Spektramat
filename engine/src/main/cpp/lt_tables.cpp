@@ -236,7 +236,10 @@ bool bake_tables(const spk::RenderParams& p, FilmTables& t, std::string& error) 
     try {
         spk::Engine& engine = p.scan_film ? *b.film : *b.print;
         auto& im = EngineAccess::impl(engine);   // the engine's private setup
-        im.setup(p);
+        // Only the legacy table bridge requests spectral LUT allocation.
+        auto table_params = p;
+        table_params.use_spectral_lut = true;
+        im.setup(table_params);
         char buf[512];
 
         std::snprintf(buf, sizeof buf, "%s|%d|%.6f|%d", p.film_stock.c_str(), (int)p.dir_couplers_active,
@@ -358,10 +361,10 @@ void neutral_shift(const std::string& film, const std::string& paper, float& y_s
     m_shift = (float)m;
 }
 
-double meter_ev(const float* rgb, int w, int h) {
+double meter_ev(const float* rgb, int w, int h, const std::string& method) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!spk::EngineContext::instance().ready || w <= 0 || h <= 0) return 0.0;
-    return EngineAccess::impl(*bench().print).auto_exposure_ev(rgb, w, h);
+    return EngineAccess::impl(*bench().print).auto_exposure_ev(rgb, w, h, method);
 }
 
 }  // namespace lt

@@ -223,7 +223,7 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onBack: 
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(Glyph.Back, "回到片库", onBack)
-                Column(Modifier.weight(1f).padding(start = 4.dp).pressable(enabled = !rig.recording) { loading = true }) {
+                Column(Modifier.weight(1f).padding(start = 4.dp).pressable(enabled = !rig.recordingBusy) { loading = true }) {
                     ScrambleText(shortName(FilmEngine.catalog.film(rig.look.film)?.name ?: rig.look.film), Type.edge, color = Ink.Amber)
                     Txt(
                         listOfNotNull(
@@ -258,7 +258,7 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onBack: 
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (allowed) {
                     if (rig.direct) {
-                        // RAW: the film draws the viewfinder into a window of this screen
+                        // The GPU draws live camera pixels into this window.
                         AndroidView(
                             factory = { c ->
                                 TextureView(c).apply {
@@ -270,7 +270,7 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onBack: 
                                                 Surface.ROTATION_270 -> 270
                                                 else -> 0
                                             }
-                                            rig.window(st, w, h, turned)
+                                            rig.window(st, w, h, turned, display)
                                         }
 
                                         override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) = rig.windowResized(w, h)
@@ -289,6 +289,10 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onBack: 
                     } else {
                         AndroidView({ finder }, Modifier.fillMaxSize())
                     }
+                    Txt(
+                        if (rig.previewLutReady) "实时预览 · 光晕/颗粒等效果以成片为准" else "正在更新胶片预览",
+                        Type.caption, Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp),
+                    )
                     if (rig.mode == Mode.Photo && (rig.look.aspect.isNotEmpty() || rig.grid)) {
                         val aspect = rig.look.aspect
                         val lines = rig.grid
@@ -487,7 +491,7 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onBack: 
                 for (m in Mode.entries) {
                     Txt(
                         if (m == Mode.Photo) "照片" else "视频", Type.label,
-                        Modifier.pressable(enabled = !rig.recording) {
+                        Modifier.pressable(enabled = !rig.recordingBusy) {
                             rig.switchMode(m)
                             if (m == Mode.Video && !holds(context, Manifest.permission.RECORD_AUDIO)) {
                                 askMicrophone.launch(Manifest.permission.RECORD_AUDIO)
@@ -498,13 +502,18 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onBack: 
                 }
             }
 
+            if (rig.mode == Mode.Video) {
+                Txt("录制关闭自动测光、光晕、颗粒、扩散、眩光与锐化", Type.caption,
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp), color = Ink.Dim, maxLines = 2)
+            }
+
             // ---- the release
             Box(Modifier.fillMaxWidth().navigationBarsPadding().height(104.dp)) {
                 rig.lastShot?.let { shot ->
                     Box(
                         Modifier.align(Alignment.CenterStart).padding(start = 30.dp).size(52.dp)
                             .clip(RoundedCornerShape(8.dp)).border(1.dp, Ink.Line, RoundedCornerShape(8.dp))
-                            .pressable(enabled = !rig.recording) { onOpen(shot.id) }
+                            .pressable(enabled = !rig.recordingBusy) { onOpen(shot.id) }
                             .semantics { contentDescription = "刚拍的这张，点开去暗房" },
                     ) {
                         FileImage(shot.thumb, Modifier.fillMaxSize())
@@ -521,7 +530,7 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onBack: 
                 if (rig.canFlip) {
                     IconButton(
                         Glyph.Flip, "换到另一面的镜头", rig::flip,
-                        Modifier.align(Alignment.CenterEnd).padding(end = 30.dp), enabled = !rig.recording,
+                        Modifier.align(Alignment.CenterEnd).padding(end = 30.dp), enabled = !rig.recordingBusy,
                     )
                 }
             }

@@ -270,7 +270,7 @@ void render_fast(const FilmTables& tables, const float grade[kGradeFloats], cons
 }
 
 void finish_planes(const float finish[kFinishFloats], const float* finish_table, const float* r, const float* g,
-                   const float* b, int w, int h, uint8_t* rgba) {
+                   const float* b, int w, int h, uint8_t* rgba, bool cctf_encoding) {
     static const FilmTables none;
     const bool finished = !finish_is_neutral(finish);
     spk::parallel_for(h, [&](int y0, int y1) {
@@ -282,12 +282,29 @@ void finish_planes(const float finish[kFinishFloats], const float* finish_table,
                 const size_t i = (size_t)y * w + x;
                 vec3 c(r[i], g[i], b[i]);
                 if (finished) c = s.finish_all(c, place(x, y, w, h), fin);
-                const vec3 e = s.lt_srgb3(c);
+                const vec3 e = cctf_encoding ? s.lt_srgb3(c) : clamp(c, vec3(0.0f), vec3(1.0f));
                 rgba[i * 4] = (uint8_t)std::lround(e.x * 255.0f);
                 rgba[i * 4 + 1] = (uint8_t)std::lround(e.y * 255.0f);
                 rgba[i * 4 + 2] = (uint8_t)std::lround(e.z * 255.0f);
                 rgba[i * 4 + 3] = 255;
             }
+        }
+    });
+}
+
+void finish_float_planes(const float finish[kFinishFloats], const float* finish_table, const float* r,
+                         const float* g, const float* b, int w, int h, float* rgb) {
+    static const FilmTables none;
+    const bool finished = !finish_is_neutral(finish);
+    spk::parallel_for(h, [&](int y0, int y1) {
+        Shared s(none, finish_table);
+        Shared::Finish fin{};
+        if (finished) fin = Shared::finish_from(finish);
+        for (int y = y0; y < y1; y++) for (int x = 0; x < w; x++) {
+            const size_t i = (size_t)y * w + x;
+            vec3 c(r[i], g[i], b[i]);
+            if (finished) c = s.finish_all(c, place(x, y, w, h), fin);
+            rgb[3 * i] = c.x; rgb[3 * i + 1] = c.y; rgb[3 * i + 2] = c.z;
         }
     });
 }

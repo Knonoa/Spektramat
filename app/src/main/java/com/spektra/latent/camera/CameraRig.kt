@@ -20,6 +20,7 @@ import com.spektra.latent.Journal
 import android.util.Range
 import android.util.Size
 import android.view.Surface
+import android.view.Display
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2Interop
@@ -68,8 +69,10 @@ import com.spektra.latent.gl.FilmEffect
 import com.spektra.latent.gl.GlCore
 import com.spektra.latent.model.Look
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -102,14 +105,22 @@ class CameraRig(context: Context, private val library: Library, private val scop
     private val main = ContextCompat.getMainExecutor(app)
     private val io = Executors.newSingleThreadExecutor()
     private val film = CameraFilm(app)
-    private val photoEffect = FilmEffect(CameraEffect.PREVIEW, film)
-    private val videoEffect = FilmEffect(CameraEffect.PREVIEW or CameraEffect.VIDEO_CAPTURE, film)
+    // Viewfinder and recording have separate GPU cubes. Captured originals
+    // reach the full photo engine only after they have been filed.
+    private val videoEffect = FilmEffect(CameraEffect.VIDEO_CAPTURE, film)
+    private var bindingGeneration = 0L
+    private var windowDisplay: Display? = null
+    @Volatile internal var previewFrames = 0L; private set
+    @Volatile internal var previewWidth = 0; private set
+    @Volatile internal var previewHeight = 0; private set
+    var previewLutReady by mutableStateOf(false); private set
 
     private var provider: ProcessCameraProvider? = null
     private var owner: LifecycleOwner? = null
     private var view: PreviewView? = null
     private var survey: Survey? = null
     private var camera: Camera? = null
+    private var livePreview: Preview? = null
     private var imageCapture: ImageCapture? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var tape: Recording? = null
@@ -157,6 +168,9 @@ class CameraRig(context: Context, private val library: Library, private val scop
     /** Between the stop and the file being complete: the encoder is finishing. */
     var saving by mutableStateOf(false); private set
 
+    /** Includes the asynchronous recorder start and finalization windows. */
+    val recordingBusy: Boolean get() = recording || saving || tape != null
+
     var shooting by mutableStateOf(false); private set
     /** Counts exposures: the viewfinder blinks when it changes. */
     var exposures by mutableIntStateOf(0); private set
@@ -201,6 +215,13 @@ class CameraRig(context: Context, private val library: Library, private val scop
     }
 
     fun stop() {
+        bindingGeneration++
+        film.active = false
+        film.recording = false
+        film.onPreviewFrame = null
+        film.resetPreview()
+        previewLutReady = false
+        previewFrames = 0
         watched?.removeObserver(watch)
         watched = null
         tape?.stop()
@@ -210,6 +231,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
             Journal.w(TAG, "unbind failed", e)
         }
         camera = null
+        livePreview = null
         imageCapture = null
         videoCapture = null
     }
@@ -244,12 +266,28 @@ class CameraRig(context: Context, private val library: Library, private val scop
         if (!f.raw) raw = false
 
         try {
+            val binding = ++bindingGeneration
+            previewLutReady = false
+            previewFrames = 0
+            previewWidth = 0; previewHeight = 0
+            film.resetPreview()
+            film.onPreviewFrame = { w, h, ready, frameLook ->
+                main.execute {
+                    if (binding == bindingGeneration && film.active) {
+                        previewFrames++
+                        previewWidth = w; previewHeight = h
+                        previewLutReady = ready && frameLook == look
+                    }
+                }
+            }
+            film.active = true
             p.unbindAll()
             camera = null
             val photo = mode == Mode.Photo
+            film.videoEnabled = !photo
             // The viewfinder has the shape of what will be kept: 4:3 for a photograph, 16:9 for video.
             // It is drawn through the film every frame, so it is asked for at screen size, not sensor size.
-            val previewBuilder = Preview.Builder().setResolutionSelector(
+            val previewBuilder = Preview.Builder().setTargetRotation(windowDisplay?.rotation ?: Surface.ROTATION_0).setResolutionSelector(
                 ResolutionSelector.Builder()
                     .setAspectRatioStrategy(if (photo) AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY else AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
                     .setResolutionStrategy(
@@ -258,10 +296,11 @@ class CameraRig(context: Context, private val library: Library, private val scop
                     .build(),
             )
             Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(results)
-            // CameraX will not combine RAW capture with an effect: there the film draws the viewfinder itself
-            val own = photo && raw
+            // A plain Preview provider keeps RAW compatible; only the video
+            // encoder has a CameraEffect. ImageCapture keeps its original.
             val preview = previewBuilder.build()
-            if (own) preview.setSurfaceProvider(GlCore.executor, film.direct) else preview.surfaceProvider = view.surfaceProvider
+            livePreview = preview
+            preview.setSurfaceProvider(GlCore.executor, film.direct)
             val group = UseCaseGroup.Builder().addUseCase(preview)
             if (photo) {
                 val builder = ImageCapture.Builder()
@@ -284,7 +323,6 @@ class CameraRig(context: Context, private val library: Library, private val scop
                 imageCapture = capture
                 videoCapture = null
                 group.addUseCase(capture)
-                if (!own) group.addEffect(photoEffect)
             } else {
                 // Film-look video is drawn frame by frame on the GPU; 1080p is where that is dependable
                 // across phones, so 4K is not offered yet.
@@ -307,7 +345,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
             watched?.removeObserver(watch)
             watched = cam.cameraInfo.cameraState.also { it.observe(owner, watch) }
             camera = cam
-            direct = own
+            direct = true
             stops = list
             stop = target
             facts = f
@@ -350,6 +388,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
         status = RigStatus.Starting
         tape = null
         recording = false
+        film.recording = false
         saving = false
         camera = null
         imageCapture = null
@@ -379,22 +418,27 @@ class CameraRig(context: Context, private val library: Library, private val scop
 
     // ---- the viewfinder window the film draws to while [direct]
 
-    fun window(target: SurfaceTexture, w: Int, h: Int, displayDegrees: Int) {
+    fun window(target: SurfaceTexture, w: Int, h: Int, displayDegrees: Int, display: Display? = null) {
+        windowDisplay = display
+        display?.let { livePreview?.targetRotation = it.rotation }
         film.displayDegrees = displayDegrees
         film.attachWindow(target, w, h)
     }
 
-    fun windowResized(w: Int, h: Int) = film.resizeWindow(w, h)
+    fun windowResized(w: Int, h: Int) {
+        windowDisplay?.let { livePreview?.targetRotation = it.rotation }
+        film.resizeWindow(w, h)
+    }
 
     /** Blocks until the film has let go of the window. */
-    fun windowGone() = film.detachWindow()
+    fun windowGone() { film.detachWindow(); windowDisplay = null }
 
     // ---- lens
 
     fun pick(target: LensStop) {
         val current = stop ?: return
         // a recording stays on its camera, and so does an exposure under way
-        if ((recording || shooting) && target.cameraId != current.cameraId) return
+        if ((recordingBusy || shooting) && target.cameraId != current.cameraId) return
         stop = target
         if (target.cameraId == current.cameraId) {
             val f = facts ?: return
@@ -419,14 +463,14 @@ class CameraRig(context: Context, private val library: Library, private val scop
     }
 
     fun flip() {
-        if (!canFlip || recording || shooting) return
+        if (!canFlip || recordingBusy || shooting) return
         front = !front
         stop = null
         bind()
     }
 
     fun switchMode(next: Mode) {
-        if (next == mode || recording || shooting) return
+        if (next == mode || recordingBusy || shooting) return
         mode = next
         flash = 0
         bind()
@@ -490,14 +534,15 @@ class CameraRig(context: Context, private val library: Library, private val scop
         if (focus != null) autoFocus()
         try {
             val point = if (direct) {
-                // the viewfinder drawn by the film shows the upright 3:4 picture fitted and centred
-                val fit = minOf(w / 3f, h / 4f)
-                val pw = 3f * fit
-                val ph = 4f * fit
+                val rw = previewWidth.takeIf { it > 0 }?.toFloat() ?: if (mode == Mode.Photo) 3f else 9f
+                val rh = previewHeight.takeIf { it > 0 }?.toFloat() ?: if (mode == Mode.Photo) 4f else 16f
+                val fit = minOf(w / rw, h / rh)
+                val pw = rw * fit
+                val ph = rh * fit
                 val px = x - (w - pw) / 2f
                 val py = y - (h - ph) / 2f
                 if (px < 0f || py < 0f || px > pw || py > ph) return
-                DisplayOrientedMeteringPointFactory(view.display ?: return, cam.cameraInfo, pw, ph).createPoint(px, py)
+                DisplayOrientedMeteringPointFactory(windowDisplay ?: view.display ?: return, cam.cameraInfo, pw, ph).createPoint(px, py)
             } else {
                 view.meteringPointFactory.createPoint(x, y)
             }
@@ -559,6 +604,11 @@ class CameraRig(context: Context, private val library: Library, private val scop
     /** Everything else about the loaded film: its format, its edge, the date back, a recipe, the shape of the picture. */
     fun change(next: Look) {
         if (next == look) return
+        if (recordingBusy) {
+            notice = "录制期间胶片配方已锁定，请结束录制后修改。"
+            return
+        }
+        previewLutReady = false
         look = next
         film.look = next
         prefs.edit().putString("look", next.toJson().toString()).apply()
@@ -611,7 +661,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
         if (surfaceRotation == rotation) return
         rotation = surfaceRotation
         imageCapture?.targetRotation = surfaceRotation
-        if (!recording) videoCapture?.targetRotation = surfaceRotation
+        if (!recordingBusy) videoCapture?.targetRotation = surfaceRotation
     }
 
     fun shoot() {
@@ -631,8 +681,8 @@ class CameraRig(context: Context, private val library: Library, private val scop
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val name = "IMG_$stamp" + if (asRaw) ".dng" else ".jpg"
         val file = File(app.cacheDir, "shot-${System.nanoTime()}" + if (asRaw) ".dng" else ".jpg")
-        // A JPEG already holds the exposure the camera and the person chose: it is filed as it is.
-        // A RAW is metered like any other RAW, and the compensation that was dialled in goes with it as the look's exposure.
+        // Keep the camera original. Reference photo metering runs when rendering it.
+        // For RAW, carry the camera compensation into the recipe's manual film EV as well.
         val compensation = ev * (facts?.evStep ?: 0f)
         val shotLook = if (asRaw) look.copy(exposure = compensation) else look
         capture.flashMode = when (flash) {
@@ -671,13 +721,13 @@ class CameraRig(context: Context, private val library: Library, private val scop
     // ---- video
 
     fun pickQuality(next: Quality) {
-        if (recording || next == quality || next !in qualities) return
+        if (recordingBusy || next == quality || next !in qualities) return
         quality = next
         bind()
     }
 
     fun pickFrameRate(next: Int) {
-        if (recording || next == frameRate || facts?.frameRates?.contains(next) != true) return
+        if (recordingBusy || next == frameRate || facts?.frameRates?.contains(next) != true) return
         frameRate = next
         bind()
     }
@@ -692,6 +742,12 @@ class CameraRig(context: Context, private val library: Library, private val scop
             return
         }
         val video = videoCapture ?: return
+        if (!film.readyFor(look)) {
+            film.look = look
+            notice = "正在生成完整视频胶片 LUT，请稍后开始录制。"
+            return
+        }
+        notice = "视频使用完整胶片转换 LUT；关闭自动测光、高光增强、扩散与模糊、光晕、散射、DIR 空间扩散、颗粒、眩光、黑白校正和锐化。"
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val name = "${APP_NAME}_$stamp.mp4"
         val pending = if (Build.VERSION.SDK_INT >= 29) {
@@ -712,25 +768,36 @@ class CameraRig(context: Context, private val library: Library, private val scop
         val microphone = ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         silent = !microphone
         recordedMs = 0L
-        tape = (if (microphone) pending.withAudioEnabled() else pending).start(main) { event ->
-            when (event) {
-                is VideoRecordEvent.Start -> recording = true
-                is VideoRecordEvent.Status -> recordedMs = event.recordingStats.recordedDurationNanos / 1_000_000
-                is VideoRecordEvent.Finalize -> {
-                    recording = false
-                    saving = false
-                    tape = null
-                    videoCapture?.targetRotation = rotation
-                    notice = if (event.hasError() && event.error != VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE) {
-                        Journal.e(TAG, "recording ended with error ${event.error}", event.cause)
-                        "这段视频没有保存下来。"
-                    } else if (Build.VERSION.SDK_INT >= 29) {
-                        "视频已保存到相册的 ${APP_NAME} 相簿。"
-                    } else {
-                        "视频已保存在 App 的 Movies/${APP_NAME} 文件夹。"
+        film.recording = true
+        try {
+            tape = (if (microphone) pending.withAudioEnabled() else pending).start(main) { event ->
+                when (event) {
+                    is VideoRecordEvent.Start -> recording = true
+                    is VideoRecordEvent.Status -> recordedMs = event.recordingStats.recordedDurationNanos / 1_000_000
+                    is VideoRecordEvent.Finalize -> {
+                        film.recording = false
+                        recording = false
+                        saving = false
+                        tape = null
+                        videoCapture?.targetRotation = rotation
+                        notice = if (event.hasError() && event.error != VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE) {
+                            Journal.e(TAG, "recording ended with error ${event.error}", event.cause)
+                            "这段视频没有保存下来。"
+                        } else if (Build.VERSION.SDK_INT >= 29) {
+                            "视频已保存到相册的 ${APP_NAME} 相簿。"
+                        } else {
+                            "视频已保存在 App 的 Movies/${APP_NAME} 文件夹。"
+                        }
                     }
                 }
             }
+        } catch (e: Exception) {
+            film.recording = false
+            recording = false
+            saving = false
+            tape = null
+            Journal.e(TAG, "recording could not start", e)
+            notice = "录像没有启动：${e.message ?: "请重试"}"
         }
     }
 

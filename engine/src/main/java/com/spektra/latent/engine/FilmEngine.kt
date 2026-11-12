@@ -2,10 +2,12 @@ package com.spektra.latent.engine
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.ColorSpace
 import org.json.JSONObject
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.MessageDigest
 
 /** A film stock the engine has data for. */
 data class FilmStock(
@@ -181,7 +183,7 @@ class Rebate(
 }
 
 /** Everything the finished print needs besides the picture and its grade. */
-class PrintOrder(
+data class PrintOrder(
     val film: String,
     val paper: String,
     val scanFilm: Boolean,
@@ -201,15 +203,29 @@ class PrintOrder(
     val filmFormatMm: Float = 35f,
     val seed: Long = 0,
     val rebate: Rebate = Rebate(),
+    /** spektrafilm camera.exposure_compensation_ev for print normalization. */
+    val exposureEv: Float = 0f,
+    val model: PhotoModel = PhotoModel(),
 ) {
+    init {
+        require(interLayerAmount.isFinite() && interLayerAmount in 0f..1.5f) {
+            "DIR amount must be between 0 and 1.5"
+        }
+    }
+
     internal fun floats() = floatArrayOf(
         printExposure, yShift, mShift, if (interLayer) 1f else 0f, interLayerAmount,
         if (halation) 1f else 0f, halationAmount, scatter, if (grain) 1f else 0f, grainAmount,
-        if (glare) 1f else 0f, glareAmount, if (sharpen) 1f else 0f, filmFormatMm,
+        if (glare) 1f else 0f, glareAmount, if (sharpen) 1f else 0f, filmFormatMm, exposureEv,
     )
 }
 
 class DevelopCancelled : IOException("cancelled")
+
+/** Both modes execute the complete algorithm; preview changes only source resolution. */
+enum class PhotoRenderMode(internal val nativeValue: Int) {
+    PHOTO_FULL(0), PHOTO_PREVIEW_FULL(1),
+}
 
 object FilmEngine {
     /** Number of floats in the `Grade` block of latent.glsl. */
@@ -229,8 +245,40 @@ object FilmEngine {
     var catalog: Catalog = Catalog(emptyList(), emptyList())
         private set
 
+    /** Changes whenever the pipeline contract or its spectral data changes. */
+    var renderCacheKey: String = "exact-v2"
+        private set
+
+    private var assetsChecked = false
+
     /** Loads the film data. Returns null when ready, else what went wrong. Safe to call again. */
+    @Synchronized
     fun start(context: Context): String? {
+        if (!assetsChecked) {
+            try {
+                val manifest = context.assets.open("engine/manifest.json").bufferedReader().use { JSONObject(it.readText()) }
+                if (manifest.getInt("schema_version") != 1 || manifest.getInt("engine_format_version") != 4)
+                    return "Unsupported spectral asset manifest"
+                if (manifest.getString("spektrafilm_commit") != PhotoModel.REFERENCE_COMMIT)
+                    return "Spectral assets do not match the configured spektrafilm version"
+                val expected = manifest.getString("engine_sha256")
+                val digest = MessageDigest.getInstance("SHA-256")
+                context.assets.open("engine/engine.bin").use { input ->
+                    val bytes = ByteArray(64 * 1024)
+                    while (true) {
+                        val size = input.read(bytes)
+                        if (size < 0) break
+                        digest.update(bytes, 0, size)
+                    }
+                }
+                val actual = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                if (actual != expected) return "Spectral asset checksum mismatch"
+                renderCacheKey = "exact-v2-${actual.take(12)}"
+                assetsChecked = true
+            } catch (e: Exception) {
+                return "Cannot validate spectral assets: ${e.message}"
+            }
+        }
         Native.init(context.applicationContext.assets)?.let { return it }
         if (catalog.films.isEmpty()) {
             val o = JSONObject(Native.catalog())
@@ -266,7 +314,7 @@ object FilmEngine {
     fun decode(path: String, maxEdge: Int, lensShading: Boolean = true): LinearImage =
         LinearImage(Native.decodeFile(path, maxEdge, lensShading))
 
-    /** An sRGB bitmap (ARGB_8888) as a scene-linear picture. */
+    /** An sRGB ARGB_8888 or extended linear-sRGB RGBA_F16 bitmap as a scene-linear picture. */
     fun fromBitmap(bitmap: Bitmap): LinearImage = LinearImage(Native.fromBitmap(bitmap))
 
     /** White-balance gains (r, g, b) for temperature and tint in -100..100; grey keeps its luminance. */
@@ -285,10 +333,9 @@ object FilmEngine {
         return out
     }
 
-    /**
-     * The table-driven film on the CPU, into a bitmap of the picture's size. For thumbnails.
-     * [finish] and [finishTable] are the `Finish` block and the finishing table of latent.glsl.
-     */
+    /** Legacy table path retained only for the video GPU/LUT bridge. Photo
+     * callers must use [develop], which executes the full spectral pipeline. */
+    @Deprecated("Photo renders must use develop(); this API is video-only", level = DeprecationLevel.ERROR)
     fun renderFast(
         image: LinearImage, tables: FilmTables, grade: FloatArray, film: FloatArray,
         finish: FloatArray, finishTable: FloatArray,
@@ -300,22 +347,45 @@ object FilmEngine {
 
     /**
      * The finished print through the full engine: every neighbourhood effect, at
-     * the picture's size. The picture is graded in place, so decode one for this
-     * call alone. Blocks; one print at a time.
+     * the picture's size. Source pixels are preserved. The proof lane reuses its
+     * developed negative for print-only edits. Blocks; one print per lane.
      * @throws DevelopCancelled after [cancelDevelop]
      */
     fun develop(
         image: LinearImage, grade: FloatArray, order: PrintOrder, finish: FloatArray, finishTable: FloatArray,
         listener: StageListener? = null, lane: Int = PRINT,
+        mode: PhotoRenderMode = if (lane == PRINT) PhotoRenderMode.PHOTO_FULL else PhotoRenderMode.PHOTO_PREVIEW_FULL,
+        highPrecision: Boolean = false,
     ): Bitmap {
         val idle = order.rebate.idle
         val strings = if (idle) null else order.rebate.strings()
         val numbers = if (idle) null else order.rebate.numbers()
         val size = developSize(image.width, image.height, order.rebate)
-        val out = Bitmap.createBitmap(size[0], size[1], Bitmap.Config.ARGB_8888)
+        require(order.model.outputColorSpace in PhotoModel.outputColorSpaces)
+        // Android's colour-managed bitmap can represent every supported space
+        // in float; ordinary sRGB previews keep their compact 8-bit surface.
+        val cs = when (order.model.outputColorSpace) {
+            "Display P3" -> ColorSpace.Named.DISPLAY_P3
+            "Adobe RGB (1998)" -> ColorSpace.Named.ADOBE_RGB
+            "ProPhoto RGB" -> ColorSpace.Named.PRO_PHOTO_RGB
+            else -> ColorSpace.Named.SRGB
+        }
+        val out = if (!highPrecision && cs == ColorSpace.Named.SRGB && order.model.outputCctfEncoding)
+            Bitmap.createBitmap(size[0], size[1], Bitmap.Config.ARGB_8888)
+        else {
+            val colorSpace = if (order.model.outputCctfEncoding) ColorSpace.get(cs) else {
+                val encoded = ColorSpace.get(cs) as ColorSpace.Rgb
+                // Bitmap requires an ICC parametric transfer function; lambda
+                // identity functions lose that metadata and are rejected.
+                ColorSpace.Rgb("Linear ${order.model.outputColorSpace}", encoded.primaries, encoded.whitePoint,
+                    ColorSpace.Rgb.TransferParameters(1.0, 0.0, 1.0, 0.0, 1.0))
+            }
+            Bitmap.createBitmap(size[0], size[1], Bitmap.Config.RGBA_F16, true, colorSpace)
+        }
         val error = Native.develop(
             image.id, grade, order.film, order.paper, order.scanFilm, order.floats(), finish, finishTable,
-            strings, numbers, lane, order.seed, out, listener,
+            strings, numbers, lane, order.seed, out, listener, order.model.floats(), mode.nativeValue,
+            order.model.outputColorSpace,
         )
         if (error != null) {
             out.recycle()
