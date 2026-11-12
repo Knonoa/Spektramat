@@ -11,6 +11,7 @@ import androidx.compose.animation.core.animateFloat
 import android.graphics.BitmapFactory
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.height
+import com.spektra.latent.APP_NAME
 import com.spektra.latent.data.Printer
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -319,7 +320,7 @@ private fun Details(job: PrintJob, desk: PrintDesk, close: () -> Unit) {
             Gap(height = 14.dp)
             Txt("$film  ${state.printed.width} × ${state.printed.height}", Type.edge)
             Gap(height = 2.dp)
-            Txt("已保存到相册的 Latent 相簿", Type.label, color = Ink.Dim)
+            Txt("已保存到相册的 ${APP_NAME} 相簿", Type.label, color = Ink.Dim)
             Gap(height = 16.dp)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Pill("分享", {

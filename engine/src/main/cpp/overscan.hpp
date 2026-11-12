@@ -16,7 +16,7 @@
 //     since engine.bin does not carry it;
 //   * half-frame pairs are not ported (the app has no pair composer).
 //
-// Latent adds one thing the desktop engine does not have, the open gate
+// Spektramat adds one thing the desktop engine does not have, the open gate
 // (`gate = open`): no gate at all, so the picture is exposed across the whole
 // width of the film, under the perforations and the edge print. The picture
 // keeps its own shape and the film is as long as the picture needs.
@@ -41,7 +41,7 @@ struct OverscanParams {
     double leaks = 0.0;              // 0..4
     std::string edge_text;           // the stock's edge print (resolved by the app)
     double f_number = 0.0;           // EXIF; the gate penumbra. 0 = f/5.6
-    std::string gate = "auto";       // auto | square | rounded | eared | shouldered | kicked | open (Latent)
+    std::string gate = "auto";       // auto | square | rounded | eared | shouldered | kicked | open (Spektramat)
     std::string holes = "white";     // white | black
     int frame_number = 0;            // 0 = the frame seed's draw, 1..99 = this number
     std::string carrier = "none";    // none | black | open
@@ -72,7 +72,7 @@ struct OverscanLayout {
     uint32_t frame_w = 0, frame_h = 0;
     uint32_t canvas_w = 0, canvas_h = 0;
     bool vertical = false;                // the film runs along the image's y axis
-    bool open = false;                    // Latent: no gate, the frame is the film from edge to edge
+    bool open = false;                    // Spektramat: no gate, the frame is the film from edge to edge
     double nominal_across = 0;            // the format's own gate across the film, mm: where a back prints
     double gate_s0 = 0, gate_t0 = 0, gate_along = 0, gate_across = 0;
     double pair_adv = 0;

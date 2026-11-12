@@ -14,6 +14,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.provider.MediaStore
+import com.spektra.latent.APP_NAME
 import com.spektra.latent.Journal
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -89,7 +90,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
     var filmOn by mutableStateOf(prefs.getBoolean("film", true)); private set
     /** The camera's settings burnt into the top of a recording. */
     var burnIn by mutableStateOf(prefs.getBoolean("burnIn", false)); private set
-    /** A second copy of every received original in the phone's Download/Latent folder. */
+    /** A second copy of every received original in the phone's Download/Spektramat folder. */
     var publicCopy by mutableStateOf(prefs.getBoolean("publicCopy", false)); private set
     /** How the monitor develops what it shows, and how received photographs are filed. */
     var look by mutableStateOf(Look.fromJson(prefs.getString("look", null))); private set
@@ -245,7 +246,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
                     try {
                         saveVideo(f)
                         f.delete()
-                        notice = "监看录像已存进相册的 Latent 相簿。"
+                        notice = "监看录像已存进相册的 ${APP_NAME} 相簿。"
                     } catch (e: Exception) {
                         notice = "录像还在 App 里，没能存进相册：${e.message}"
                     }
@@ -422,7 +423,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
             notice = try {
                 savePublic(whole, name)
                 whole.delete()
-                "收到了 $name。片库读不了这种文件，已把它存到 Download/Latent。"
+                "收到了 $name。片库读不了这种文件，已把它存到 Download/${APP_NAME}。"
             } catch (e: Exception) {
                 val kept = File(File(incoming, "kept").apply { mkdirs() }, name)
                 whole.renameTo(kept)
@@ -435,7 +436,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
         if (copy != null) {
             try {
                 savePublic(copy, name)
-                notice = "已接收 $name，另存了一份到 Download/Latent。"
+                notice = "已接收 $name，另存了一份到 Download/${APP_NAME}。"
             } catch (e: Exception) {
                 notice = "已接收 $name。另存到手机存储没有成功：${e.message}"
             } finally {
@@ -470,7 +471,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
             file.copyTo(File(dir, file.name), overwrite = true)
             return
         }
-        publish(file, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "Movies/Latent", file.name, "video/mp4")
+        publish(file, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "Movies/${APP_NAME}", file.name, "video/mp4")
     }
 
     private fun savePublic(file: File, name: String) {
@@ -481,7 +482,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
             "hif", "heif", "heic" -> "image/heif"
             else -> "image/jpeg"
         }
-        publish(file, MediaStore.Downloads.EXTERNAL_CONTENT_URI, "Download/Latent", name, mime)
+        publish(file, MediaStore.Downloads.EXTERNAL_CONTENT_URI, "Download/${APP_NAME}", name, mime)
     }
 
     private fun publish(file: File, collection: Uri, folder: String, name: String, mime: String) {

@@ -141,7 +141,8 @@ fun Root(app: LatentApp, incoming: List<Uri>, onIncomingTaken: () -> Unit) {
         }
         AnimatedVisibility(curtain, enter = fadeIn(tween(0)), exit = fadeOut(tween(360))) {
             Box(Modifier.fillMaxSize().background(Ink.Curtain)) {
-                GlyphField(GlyphSubject.Word("LATENT"), Modifier.fillMaxSize(), cell = 12.dp, strength = 0.8f)
+                // ten letters across a phone are set in dots (Glyphs.kt); the grid is a little finer than elsewhere so they fit
+                GlyphField(GlyphSubject.Word("SPEKTRAMAT"), Modifier.fillMaxSize(), cell = 9.dp, strength = 0.8f)
             }
         }
     }

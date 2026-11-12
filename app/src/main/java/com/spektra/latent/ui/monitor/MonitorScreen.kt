@@ -43,6 +43,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.spektra.latent.APP_NAME
 import com.spektra.latent.data.Recipes
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.model.Choice
@@ -177,7 +178,7 @@ private fun Idle(monitor: Monitor, onBack: () -> Unit, onLook: () -> Unit) {
             SettingRow("录制时带上参数", "把感光度、光圈、快门烧在监看录像的顶上。") {
                 Toggle(monitor.burnIn, monitor::burnIn, "录制时带上参数")
             }
-            SettingRow("另存一份到手机存储", "原片总是存进片库。打开后再复制一份到 Download/Latent，占两份空间。") {
+            SettingRow("另存一份到手机存储", "原片总是存进片库。打开后再复制一份到 Download/${APP_NAME}，占两份空间。") {
                 Toggle(monitor.publicCopy, monitor::publicCopy, "另存一份到手机存储")
             }
             Gap(height = 8.dp)

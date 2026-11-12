@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
+import com.spektra.latent.APP_NAME
 import com.spektra.latent.Journal
 import android.util.Range
 import android.util.Size
@@ -692,12 +693,12 @@ class CameraRig(context: Context, private val library: Library, private val scop
         }
         val video = videoCapture ?: return
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val name = "Latent_$stamp.mp4"
+        val name = "${APP_NAME}_$stamp.mp4"
         val pending = if (Build.VERSION.SDK_INT >= 29) {
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, name)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Latent")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/${APP_NAME}")
             }
             video.output.prepareRecording(
                 app,
@@ -705,7 +706,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
             )
         } else {
             // before Android 10 the shared gallery needs a storage permission; the film stays in the app's own folder
-            val dir = File(app.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "Latent").apply { mkdirs() }
+            val dir = File(app.getExternalFilesDir(Environment.DIRECTORY_MOVIES), APP_NAME).apply { mkdirs() }
             video.output.prepareRecording(app, FileOutputOptions.Builder(File(dir, name)).build())
         }
         val microphone = ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -724,9 +725,9 @@ class CameraRig(context: Context, private val library: Library, private val scop
                         Journal.e(TAG, "recording ended with error ${event.error}", event.cause)
                         "这段视频没有保存下来。"
                     } else if (Build.VERSION.SDK_INT >= 29) {
-                        "视频已保存到相册的 Latent 相簿。"
+                        "视频已保存到相册的 ${APP_NAME} 相簿。"
                     } else {
-                        "视频已保存在 App 的 Movies/Latent 文件夹。"
+                        "视频已保存在 App 的 Movies/${APP_NAME} 文件夹。"
                     }
                 }
             }

@@ -34,9 +34,9 @@
 #include "engine_data.hpp"
 #include "overscan.hpp"
 
-// Latent: lt_tables.cpp reads the engine's own tables (curves, enlarger LUT) to
+// Spektramat: lt_tables.cpp reads the engine's own tables (curves, enlarger LUT) to
 // hand them to the GPU. In spektra_engine.cpp the film's edge asks
-// overscan_frame() for the crop and the frame's size, so that Latent's open
+// overscan_frame() for the crop and the frame's size, so that Spektramat's open
 // gate keeps the whole picture. Nothing else is changed in this header or in
 // spektra_engine.cpp.
 namespace lt { struct EngineAccess; }

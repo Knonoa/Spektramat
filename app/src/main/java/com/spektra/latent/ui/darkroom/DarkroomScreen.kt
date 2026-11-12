@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.spektra.latent.APP_NAME
 import com.spektra.latent.data.Recipes
 import com.spektra.latent.model.Aspects
 import com.spektra.latent.model.Format
@@ -313,7 +314,7 @@ fun DarkroomScreen(library: Library, recipes: Recipes, frameId: Long, onBack: ()
         Sheet(ordering, { ordering = false }) {
             Txt("冲印这张照片", Type.heading)
             Gap(height = 4.dp)
-            Txt("冲印在后台进行，不耽误继续调整；成片保存到相册的 Latent 相簿。尺寸是长边的像素数。", Type.label, color = Ink.Dim, maxLines = 3)
+            Txt("冲印在后台进行，不耽误继续调整；成片保存到相册的 ${APP_NAME} 相簿。尺寸是长边的像素数。", Type.label, color = Ink.Dim, maxLines = 3)
             Gap(height = 14.dp)
             val native = state.look.frameSize(frame.width, frame.height).max()
             val sizes = listOf(2048, 3072, 4096).filter { it < native } + native

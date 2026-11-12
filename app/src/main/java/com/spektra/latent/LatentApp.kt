@@ -15,6 +15,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
+/**
+ * The app's name where it shows outside the app: its album in the gallery, its folders in Movies and
+ * Download, and the software named in a print's metadata. (The launcher's label is `app_name` in
+ * strings.xml. The package and the names in the code keep the working name, latent.)
+ */
+const val APP_NAME = "Spektramat"
+
 /** What the process needs before any screen can work: the film data and the library. */
 sealed interface Startup {
     data object Loading : Startup

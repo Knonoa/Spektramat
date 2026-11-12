@@ -1065,7 +1065,7 @@ struct Engine::Impl {
         double edge_long_mm = 0;
         if (ov) {
             int cx, cy, cw, chh;
-            // Latent: overscan_frame, so that an open gate keeps the whole picture
+            // Spektramat: overscan_frame, so that an open gate keeps the whole picture
             if (!overscan_frame(p.overscan, w_in, h_in, cx, cy, cw, chh, edge_long_mm))
                 throw std::string("overscan: unknown format '" + p.overscan.format + "'");
             if (cw != w_in || chh != h_in) {

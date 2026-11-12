@@ -33,6 +33,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import com.spektra.latent.APP_NAME
 import com.spektra.latent.Journal
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -637,7 +638,7 @@ fun TableScreen(library: Library, store: LightTableStore, onBack: () -> Unit, on
         Sheet(exportOpen, { exportOpen = false }) {
             Txt("把观片台存成一张图", Type.heading)
             Gap(height = 4.dp)
-            Txt("存下来的和看到的一样，带着灯光和色温；不带网格点和选择框。保存到相册的 Latent 相簿。", Type.label, color = Ink.Dim, maxLines = 3)
+            Txt("存下来的和看到的一样，带着灯光和色温；不带网格点和选择框。保存到相册的 ${APP_NAME} 相簿。", Type.label, color = Ink.Dim, maxLines = 3)
             Gap(height = 12.dp)
             for ((all, title, note) in listOf(Triple(false, "当前窗口", "屏幕上现在看到的这一块"), Triple(true, "全部照片", "台上所有的照片，四周留一点边"))) {
                 Column(
@@ -808,7 +809,7 @@ private fun save(context: Context, bitmap: Bitmap) {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Latent")
+            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/${APP_NAME}")
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: throw IOException("相册没有接受这张图")

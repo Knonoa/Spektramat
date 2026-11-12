@@ -50,7 +50,10 @@ sealed interface GlyphSubject {
     /** Slow drifting noise. */
     data object Room : GlyphSubject
 
-    /** A word standing out of the noise in dense, flickering characters. Latin capitals and digits read best. */
+    /**
+     * A word standing out of the noise in dense, flickering characters. Latin capitals and digits read best;
+     * a word too long for the grid to hold as drawn letters is set in dots, and then only those are known.
+     */
     data class Word(val text: String) : GlyphSubject
 
     /**
@@ -92,13 +95,18 @@ private fun noise(x: Float, y: Float): Float {
 }
 
 /** A brightness per cell, [cols] x [rows], and for a picture its colours. */
-private class Field(val cols: Int, val rows: Int, val luma: FloatArray?, val argb: IntArray?)
+private class Field(
+    val cols: Int, val rows: Int, val luma: FloatArray?, val argb: IntArray?,
+    /** A word set in dots: its strokes are one cell thick, so every cell of it is drawn dense and bright. */
+    val solid: Boolean = false,
+)
 
 private fun fieldOf(subject: GlyphSubject, cols: Int, rows: Int, cellW: Float, cellH: Float, face: Typeface): Field {
     if (cols <= 0 || rows <= 0) return Field(0, 0, null, null)
     when (subject) {
         GlyphSubject.Room -> return Field(cols, rows, null, null)
         is GlyphSubject.Word -> {
+            dotWord(subject.text, cols, rows)?.let { return Field(cols, rows, it, null, solid = true) }
             // the word drawn small, one pixel per cell
             val bitmap = Bitmap.createBitmap(cols, rows, Bitmap.Config.ARGB_8888)
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -229,8 +237,9 @@ fun GlyphField(
                             }
                         }
                         luma[y * cols + x] > 0.5f -> {
-                            v = 0.55f + 0.45f * hash(x + floor(t * 8f), y.toFloat())
-                            tone = if (hash(x.toFloat(), y + floor(t * 3f)) > 0.82f) 2 else 1
+                            val flicker = hash(x + floor(t * 8f), y.toFloat())
+                            v = if (f.solid) 0.8f + 0.2f * flicker else 0.55f + 0.45f * flicker
+                            tone = if (hash(x.toFloat(), y + floor(t * 3f)) > (if (f.solid) 0.15f else 0.82f)) 2 else 1
                         }
                         else -> v = n.pow(3f) * 0.5f * strength
                     }
@@ -249,6 +258,74 @@ fun GlyphField(
             }
         }
     }
+}
+
+/** With fewer columns than this to a letter, a drawn letter loses its strokes on the grid. */
+private const val DRAWN_COLS = 9
+
+/** A 5 x 7 dot face, capitals and digits: seven rows from the top. */
+private val DOT_FACE: Map<Char, String> = mapOf(
+    'A' to ".###. #...# #...# ##### #...# #...# #...#",
+    'B' to "####. #...# #...# ####. #...# #...# ####.",
+    'C' to ".###. #...# #.... #.... #.... #...# .###.",
+    'D' to "####. #...# #...# #...# #...# #...# ####.",
+    'E' to "##### #.... #.... ####. #.... #.... #####",
+    'F' to "##### #.... #.... ####. #.... #.... #....",
+    'G' to ".###. #...# #.... #.### #...# #...# .###.",
+    'H' to "#...# #...# #...# ##### #...# #...# #...#",
+    'I' to ".###. ..#.. ..#.. ..#.. ..#.. ..#.. .###.",
+    'J' to "..### ...#. ...#. ...#. ...#. #..#. .##..",
+    'K' to "#...# #..#. #.#.. ##... #.#.. #..#. #...#",
+    'L' to "#.... #.... #.... #.... #.... #.... #####",
+    'M' to "#...# ##.## #.#.# #.#.# #...# #...# #...#",
+    'N' to "#...# #...# ##..# #.#.# #..## #...# #...#",
+    'O' to ".###. #...# #...# #...# #...# #...# .###.",
+    'P' to "####. #...# #...# ####. #.... #.... #....",
+    'Q' to ".###. #...# #...# #...# #.#.# #..#. .##.#",
+    'R' to "####. #...# #...# ####. #.#.. #..#. #...#",
+    'S' to ".#### #.... #.... .###. ....# ....# ####.",
+    'T' to "##### ..#.. ..#.. ..#.. ..#.. ..#.. ..#..",
+    'U' to "#...# #...# #...# #...# #...# #...# .###.",
+    'V' to "#...# #...# #...# #...# #...# .#.#. ..#..",
+    'W' to "#...# #...# #...# #.#.# #.#.# #.#.# .#.#.",
+    'X' to "#...# #...# .#.#. ..#.. .#.#. #...# #...#",
+    'Y' to "#...# #...# .#.#. ..#.. ..#.. ..#.. ..#..",
+    'Z' to "##### ....# ...#. ..#.. .#... #.... #####",
+    '0' to ".###. #...# #..## #.#.# ##..# #...# .###.",
+    '1' to "..#.. .##.. ..#.. ..#.. ..#.. ..#.. .###.",
+    '2' to ".###. #...# ....# ...#. ..#.. .#... #####",
+    '3' to "##### ...#. ..#.. ...#. ....# #...# .###.",
+    '4' to "...#. ..##. .#.#. #..#. ##### ...#. ...#.",
+    '5' to "##### #.... ####. ....# ....# #...# .###.",
+    '6' to "..##. .#... #.... ####. #...# #...# .###.",
+    '7' to "##### ....# ...#. ..#.. .#... .#... .#...",
+    '8' to ".###. #...# #...# .###. #...# #...# .###.",
+    '9' to ".###. #...# #...# .#### ....# ...#. .##..",
+)
+
+/**
+ * [text] in the dot face, a cell to a dot (more where whole cells allow), in the middle of the grid. Null when
+ * the word is short enough to be drawn as letters, or too long for the grid even at a cell to a dot.
+ */
+private fun dotWord(text: String, cols: Int, rows: Int): FloatArray? {
+    val n = text.length
+    if (n == 0 || cols / n >= DRAWN_COLS) return null
+    val wide = n * 6 - 1                       // five dots to a letter and one between
+    val k = min(cols / (wide + 2), rows / 9)   // at least a dot of air on every side
+    if (k < 1) return null
+    val luma = FloatArray(cols * rows)
+    val x0 = (cols - wide * k) / 2
+    val y0 = (rows - 7 * k) / 2
+    for ((i, ch) in text.withIndex()) {
+        val glyph = DOT_FACE[ch.uppercaseChar()] ?: continue
+        for (gy in 0 until 7) for (gx in 0 until 5) {
+            if (glyph[gy * 6 + gx] != '#') continue   // the rows of a glyph are five dots and a space
+            for (dy in 0 until k) for (dx in 0 until k) {
+                luma[(y0 + gy * k + dy) * cols + x0 + (i * 6 + gx) * k + dx] = 1f
+            }
+        }
+    }
+    return luma
 }
 
 private const val LATIN = "ABCDEFGHJKLMNPQRSTUVWXYZ#%*+=<>/"

@@ -95,7 +95,7 @@ const Format* find_format(const std::string& name) {
     return nullptr;
 }
 
-// Latent, the open gate. The film runs along the picture's long side, except
+// Spektramat, the open gate. The film runs along the picture's long side, except
 // in the formats whose frame stands across the film (half frame, 645): there
 // it runs along the short side, as it does in those cameras.
 bool open_vertical(const Format& f, uint32_t w, uint32_t h) { return (w >= h) == (f.along < f.across); }
@@ -907,7 +907,7 @@ const char* const* tiny_glyph(const std::string& text, size_t& i) {
 // skeleton, zero slashed: sampling "PRO400H" and "145 3" on a 5 x 7 grid
 // gives exactly those glyphs, on 7 x 9 it gives mush), with RDP's III as three strokes in one cell.
 const char* const* matrix57_glyph(const std::string& text, size_t& i) {
-    // Latent: per thread, because a print, a proof and a thumbnail may each be drawing an edge at once.
+    // Spektramat: per thread, because a print, a proof and a thumbnail may each be drawing an edge at once.
     // Storage only; what is drawn is unchanged.
     static thread_local char buf[7][6];
     static thread_local const char* rows[7];

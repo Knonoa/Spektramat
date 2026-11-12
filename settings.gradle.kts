@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Latent"
+rootProject.name = "Spektramat"
 include(":engine", ":app")

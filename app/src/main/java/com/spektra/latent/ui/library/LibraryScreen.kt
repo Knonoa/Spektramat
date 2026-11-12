@@ -49,6 +49,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.spektra.latent.APP_NAME
 import com.spektra.latent.LatentApp
 import com.spektra.latent.data.Frame
 import com.spektra.latent.data.Library
@@ -231,7 +232,7 @@ fun LibraryScreen(
         Sheet(printing, { printing = false }) {
             Txt("冲印这 ${selection.size} 张", Type.heading)
             Gap(height = 4.dp)
-            Txt("每一张按它自己现在的设置冲印，在后台一张接一张地做，成片保存到相册的 Latent 相簿。尺寸是长边的像素数。", Type.label, color = Ink.Dim, maxLines = 3)
+            Txt("每一张按它自己现在的设置冲印，在后台一张接一张地做，成片保存到相册的 ${APP_NAME} 相簿。尺寸是长边的像素数。", Type.label, color = Ink.Dim, maxLines = 3)
             Gap(height = 14.dp)
             for ((edge, note) in listOf(2048 to "适合手机上看和分享", 3072 to "适合大屏", 4096 to "适合小幅打印", 0 to "各自的原尺寸")) {
                 Row(

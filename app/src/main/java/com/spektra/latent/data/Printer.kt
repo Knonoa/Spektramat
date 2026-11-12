@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import com.spektra.latent.APP_NAME
 import com.spektra.latent.Journal
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
@@ -94,7 +95,7 @@ object Printer {
             val values = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, name)
                 put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Latent")
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/${APP_NAME}")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
@@ -127,7 +128,7 @@ object Printer {
             context.contentResolver.openFileDescriptor(print, "rw")?.use { fd ->
                 val to = ExifInterface(fd.fileDescriptor)
                 for (tag in TAGS) from.getAttribute(tag)?.let { to.setAttribute(tag, it) }
-                to.setAttribute(ExifInterface.TAG_SOFTWARE, "Latent")
+                to.setAttribute(ExifInterface.TAG_SOFTWARE, APP_NAME)
                 to.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
                 to.saveAttributes()
             }
