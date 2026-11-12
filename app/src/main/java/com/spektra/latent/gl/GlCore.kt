@@ -9,7 +9,7 @@ import android.opengl.EGLSurface
 import android.opengl.GLES30
 import android.os.Handler
 import android.os.HandlerThread
-import android.util.Log
+import com.spektra.latent.Journal
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 
@@ -62,7 +62,7 @@ object GlCore {
                 try {
                     block()
                 } catch (t: Throwable) {
-                    Log.e(TAG, "GL task failed", t)
+                    Journal.e(TAG, "GL task failed", t)
                 }
             }
         }
@@ -77,7 +77,7 @@ object GlCore {
             try {
                 if (failure == null) result = block()
             } catch (t: Throwable) {
-                Log.e(TAG, "GL task failed", t)
+                Journal.e(TAG, "GL task failed", t)
             } finally {
                 latch.countDown()
             }
@@ -117,10 +117,10 @@ object GlCore {
             check(EGL14.eglMakeCurrent(display, offscreen, offscreen, context)) { "the GL context could not be used" }
             val extensions = GLES30.glGetString(GLES30.GL_EXTENSIONS) ?: ""
             floatTargets = extensions.contains("GL_EXT_color_buffer_half_float") || extensions.contains("GL_EXT_color_buffer_float")
-            Log.i(TAG, "GL ready: ${GLES30.glGetString(GLES30.GL_RENDERER)}, ${GLES30.glGetString(GLES30.GL_VERSION)}, float targets $floatTargets, recordable $recordable")
+            Journal.i(TAG, "GL ready: ${GLES30.glGetString(GLES30.GL_RENDERER)}, ${GLES30.glGetString(GLES30.GL_VERSION)}, float targets $floatTargets, recordable $recordable")
         } catch (t: Throwable) {
             failure = t.message ?: "the GPU pipeline could not start"
-            Log.e(TAG, "GL unavailable", t)
+            Journal.e(TAG, "GL unavailable", t)
         }
     }
 

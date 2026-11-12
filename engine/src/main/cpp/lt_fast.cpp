@@ -14,7 +14,8 @@ namespace lt::glsl {
 // interpolation the shader's samplers perform.
 struct Shared {
     const FilmTables& t;
-    explicit Shared(const FilmTables& tables) : t(tables) {}
+    const float* finish_table;   // kFinishTableFloats, or null
+    explicit Shared(const FilmTables& tables, const float* finishing = nullptr) : t(tables), finish_table(finishing) {}
 
     static vec3 texel(const std::vector<float>& v, size_t i) { return vec3(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]); }
 
@@ -67,6 +68,32 @@ struct Shared {
     vec3 tex_enlarger(vec3 c) { return trilinear(t.enlarger, t.enlarger_n, c); }
     vec3 tex_scan(vec3 c) { return trilinear(t.scan, t.scan_n, c); }
 
+    vec3 tex_curve(vec3 u) {
+        if (!finish_table) return u;
+        const int n = kFinishSamples;
+        const float uu[3] = {u.x, u.y, u.z};
+        float out[3];
+        for (int c = 0; c < 3; c++) {
+            const float x = clamp(uu[c], 0.0f, 1.0f) * (float)(n - 1);
+            const int i = std::min((int)x, n - 2);
+            const float f = x - (float)i;
+            const float a = finish_table[(size_t)i * 3 + c], b = finish_table[(size_t)(i + 1) * 3 + c];
+            out[c] = a + (b - a) * f;
+        }
+        return vec3(out[0], out[1], out[2]);
+    }
+
+    vec3 tex_mixer(float hue) {
+        if (!finish_table) return vec3(0.0f);
+        const int n = kFinishSamples;
+        const float* row = finish_table + (size_t)n * 3;
+        const float x = (hue - floor(hue)) * (float)n;
+        const int i = std::min((int)x, n - 1);
+        const float f = x - (float)i;
+        const int j = (i + 1) % n;
+        return mix(vec3(row[i * 3], row[i * 3 + 1], row[i * 3 + 2]), vec3(row[j * 3], row[j * 3 + 1], row[j * 3 + 2]), f);
+    }
+
 #include "latent.glsl"
 
     static Grade grade_from(const float* g) {
@@ -107,6 +134,22 @@ struct Shared {
         o.grain = f[41];
         o.grain_amount = f[42];
         o.seed = f[43];
+        return o;
+    }
+
+    static Finish finish_from(const float* f) {
+        Finish o;
+        o.curve = f[0];
+        o.mixer = f[1];
+        o.grading = f[2];
+        o.tint_s = vec3(f[3], f[4], f[5]);
+        o.tint_m = vec3(f[6], f[7], f[8]);
+        o.tint_h = vec3(f[9], f[10], f[11]);
+        o.lift = vec3(f[12], f[13], f[14]);
+        o.balance = f[15];
+        o.blending = f[16];
+        o.vignette = f[17];
+        o.vignette_mid = f[18];
         return o;
     }
 };
@@ -182,19 +225,33 @@ void grade_image(const float grade[kGradeFloats], const float* in, float* out, i
     });
 }
 
+bool finish_is_neutral(const float finish[kFinishFloats]) {
+    return finish[0] < 0.5f && finish[1] < 0.5f && finish[2] < 0.5f && finish[17] == 0.0f;
+}
+
+// A pixel's place in the picture as finish_all() wants it: -1..1 on each axis, at the pixel's centre.
+static vec2 place(int x, int y, int w, int h) {
+    return vec2(((float)x + 0.5f) / (float)w * 2.0f - 1.0f, ((float)y + 0.5f) / (float)h * 2.0f - 1.0f);
+}
+
 void render_fast(const FilmTables& tables, const float grade[kGradeFloats], const float film[kFilmFloats],
-                 const float* rgb, int w, int h, uint8_t* rgba, float* linear) {
+                 const float* rgb, int w, int h, uint8_t* rgba, float* linear, const float* finish,
+                 const float* finish_table) {
     const bool graded = !grade_is_neutral(grade);
+    const bool finished = finish && !finish_is_neutral(finish);
     spk::parallel_for(h, [&](int y0, int y1) {
-        Shared s(tables);
+        Shared s(tables, finish_table);
         const Shared::Grade g = Shared::grade_from(grade);
         const Shared::Film f = Shared::film_from(film);
+        Shared::Finish fin{};
+        if (finished) fin = Shared::finish_from(finish);
         for (int y = y0; y < y1; y++) {
             for (int x = 0; x < w; x++) {
                 const size_t i = (size_t)y * w + x;
                 vec3 c(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
                 if (graded) c = s.grade_scene(c, g);
                 c = s.film_all(c, vec2((float)x, (float)y), f);
+                if (finished) c = s.finish_all(c, place(x, y, w, h), fin);
                 if (linear) {
                     linear[i * 3] = c.x;
                     linear[i * 3 + 1] = c.y;
@@ -207,6 +264,29 @@ void render_fast(const FilmTables& tables, const float grade[kGradeFloats], cons
                     rgba[i * 4 + 2] = (uint8_t)std::lround(e.z * 255.0f);
                     rgba[i * 4 + 3] = 255;
                 }
+            }
+        }
+    });
+}
+
+void finish_planes(const float finish[kFinishFloats], const float* finish_table, const float* r, const float* g,
+                   const float* b, int w, int h, uint8_t* rgba) {
+    static const FilmTables none;
+    const bool finished = !finish_is_neutral(finish);
+    spk::parallel_for(h, [&](int y0, int y1) {
+        Shared s(none, finish_table);
+        Shared::Finish fin{};
+        if (finished) fin = Shared::finish_from(finish);
+        for (int y = y0; y < y1; y++) {
+            for (int x = 0; x < w; x++) {
+                const size_t i = (size_t)y * w + x;
+                vec3 c(r[i], g[i], b[i]);
+                if (finished) c = s.finish_all(c, place(x, y, w, h), fin);
+                const vec3 e = s.lt_srgb3(c);
+                rgba[i * 4] = (uint8_t)std::lround(e.x * 255.0f);
+                rgba[i * 4 + 1] = (uint8_t)std::lround(e.y * 255.0f);
+                rgba[i * 4 + 2] = (uint8_t)std::lround(e.z * 255.0f);
+                rgba[i * 4 + 3] = 255;
             }
         }
     });

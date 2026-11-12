@@ -15,6 +15,11 @@
 //   * the light weights read the film's sensitivity from edge_sensitivity.inc,
 //     since engine.bin does not carry it;
 //   * half-frame pairs are not ported (the app has no pair composer).
+//
+// Latent adds one thing the desktop engine does not have, the open gate
+// (`gate = open`): no gate at all, so the picture is exposed across the whole
+// width of the film, under the perforations and the edge print. The picture
+// keeps its own shape and the film is as long as the picture needs.
 #pragma once
 
 #include <cstdint>
@@ -36,7 +41,7 @@ struct OverscanParams {
     double leaks = 0.0;              // 0..4
     std::string edge_text;           // the stock's edge print (resolved by the app)
     double f_number = 0.0;           // EXIF; the gate penumbra. 0 = f/5.6
-    std::string gate = "auto";       // auto | square | rounded | eared | shouldered | kicked
+    std::string gate = "auto";       // auto | square | rounded | eared | shouldered | kicked | open (Latent)
     std::string holes = "white";     // white | black
     int frame_number = 0;            // 0 = the frame seed's draw, 1..99 = this number
     std::string carrier = "none";    // none | black | open
@@ -67,6 +72,8 @@ struct OverscanLayout {
     uint32_t frame_w = 0, frame_h = 0;
     uint32_t canvas_w = 0, canvas_h = 0;
     bool vertical = false;                // the film runs along the image's y axis
+    bool open = false;                    // Latent: no gate, the frame is the film from edge to edge
+    double nominal_across = 0;            // the format's own gate across the film, mm: where a back prints
     double gate_s0 = 0, gate_t0 = 0, gate_along = 0, gate_across = 0;
     double pair_adv = 0;
     double corner = 0, penumbra = 0;
@@ -119,8 +126,16 @@ bool overscan_gate_mm(const std::string& format, double& gate_long, double& gate
 // app has the user crop to it; the Android app has no crop yet).
 void overscan_gate_crop(const std::string& format, int w, int h, int& cx, int& cy, int& cw, int& ch);
 
+// What the engine does with a w x h picture before it lays it on the film:
+// the crop (the gate's shape, centred; the whole picture with the gate open)
+// and the long edge of what is left, in mm on the film. False for an unknown
+// format.
+bool overscan_frame(const OverscanParams& o, int w, int h, int& cx, int& cy, int& cw, int& ch, double& long_mm);
+
 // The canvas's geometry and every random draw, from the seeds. `px_mm` is
-// the frame's pitch: the gate's long edge over the frame's long edge.
+// the frame's pitch: the gate's long edge over the frame's long edge (with the
+// gate open, the film's width over the frame's size across it -- what
+// overscan_frame gives).
 bool overscan_layout(const OverscanParams& o, double px_mm, uint32_t frame_w, uint32_t frame_h,
                      OverscanLayout& L, std::string& error);
 

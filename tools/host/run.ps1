@@ -29,7 +29,11 @@ function Build-Test([string]$Name, [string[]]$Sources) {
 $engine = @('lt_tables.cpp', 'lt_fast.cpp', 'overscan.cpp', 'filters.cpp', 'cam16.cpp') | ForEach-Object { Join-Path $cpp $_ }
 
 $exe = Build-Test 'fast-vs-engine' (@((Join-Path $PSScriptRoot 'fast_vs_engine.cpp')) + $engine)
-& $exe $bin 2>&1 | Tee-Object (Join-Path $OutputDirectory 'fast-vs-engine.txt')
+# the edge print's faces, and a place for pictures of the film's edge to look at (PPM)
+$fonts = Join-Path $project 'engine\src\main\assets\fonts'
+$proofs = Join-Path $OutputDirectory 'proofs'
+New-Item -ItemType Directory -Force -Path $proofs | Out-Null
+& $exe $bin $fonts $proofs 2>&1 | Tee-Object (Join-Path $OutputDirectory 'fast-vs-engine.txt')
 $fastCode = $LASTEXITCODE
 
 if ($fastCode -ne 0) { exit 1 }

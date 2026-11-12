@@ -86,12 +86,29 @@ import com.spektra.latent.ui.Pill
 import com.spektra.latent.ui.Ruler
 import com.spektra.latent.ui.Sheet
 import com.spektra.latent.ui.StockStrip
+import com.spektra.latent.ui.ChoiceStrip
+import com.spektra.latent.ui.Icon
+import com.spektra.latent.ui.ScrambleText
+import com.spektra.latent.ui.SettingRow
+import com.spektra.latent.ui.Toggle
+import com.spektra.latent.ui.darkroom.EdgeBench
+import com.spektra.latent.data.PrintDesk
+import com.spektra.latent.data.Recipes
+import com.spektra.latent.model.Aspects
+import com.spektra.latent.model.Choice
+import com.spektra.latent.model.Format
+import androidx.core.content.FileProvider
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.mutableIntStateOf
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import com.spektra.latent.ui.Txt
 import com.spektra.latent.ui.Type
 import com.spektra.latent.ui.filmStocks
 import com.spektra.latent.ui.pressable
 import com.spektra.latent.ui.shortName
-import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -109,7 +126,7 @@ import kotlin.math.roundToInt
  * The screen stays upright; pictures are stored the way the phone was held.
  */
 @Composable
-fun CameraScreen(library: Library, onBack: () -> Unit, onOpen: (Long) -> Unit) {
+fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onBack: () -> Unit, onOpen: (Long) -> Unit) {
     val context = LocalContext.current
     val app = context.applicationContext as LatentApp
     val owner = LocalLifecycleOwner.current
@@ -164,8 +181,37 @@ fun CameraScreen(library: Library, onBack: () -> Unit, onOpen: (Long) -> Unit) {
 
     var dial by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
+    var back by remember { mutableIntStateOf(0) }       // which page of the back is open: film, edge and date, shooting
+    val saved by recipes.all.collectAsStateWithLifecycle()
     val facts = rig.facts
-    val dials = facts?.let { dialsOf(it) }.orEmpty()
+    val dials = (if (rig.mode == Mode.Photo) listOf("aspect") else emptyList()) + facts?.let { dialsOf(it) }.orEmpty()
+
+    // a print of every photograph as soon as it is filed, when the person has asked for that
+    DisposableEffect(rig) {
+        rig.onFiled = { frame -> if (rig.printOnRelease) prints.order(frame, frame.look, 3072) }
+        onDispose { rig.onFiled = null }
+    }
+    // the phone's own camera app, for lenses the phone keeps to itself: its picture comes back here whole
+    var handover by remember { mutableStateOf<File?>(null) }
+    val systemCamera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { taken ->
+        val file = handover
+        handover = null
+        if (file != null) {
+            if (taken && file.length() > 0) rig.file(file, "SYS_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg")
+            else file.delete()
+        }
+    }
+    fun openSystemCamera() {
+        try {
+            val dir = File(context.cacheDir, "handover").apply { mkdirs() }
+            val file = File(dir, "system-${System.nanoTime()}.jpg")
+            handover = file
+            systemCamera.launch(FileProvider.getUriForFile(context, context.packageName + ".files", file))
+        } catch (e: Exception) {
+            handover = null
+            rig.notice = "这台手机没有可以打开的系统相机。"
+        }
+    }
     if (dial != null && dial !in dials) dial = null
     BackHandler(enabled = dial != null) { dial = null }
 
@@ -178,8 +224,26 @@ fun CameraScreen(library: Library, onBack: () -> Unit, onOpen: (Long) -> Unit) {
             ) {
                 IconButton(Glyph.Back, "回到片库", onBack)
                 Column(Modifier.weight(1f).padding(start = 4.dp).pressable(enabled = !rig.recording) { loading = true }) {
-                    Txt(shortName(FilmEngine.catalog.film(rig.look.film)?.name ?: rig.look.film), Type.edge, color = Ink.Amber)
-                    Txt("换一卷", Type.caption)
+                    ScrambleText(shortName(FilmEngine.catalog.film(rig.look.film)?.name ?: rig.look.film), Type.edge, color = Ink.Amber)
+                    Txt(
+                        listOfNotNull(
+                            "机背", Format.of(rig.look.format).label,
+                            "片边".takeIf { rig.look.edge.on }, "日期".takeIf { rig.look.date.on },
+                            "即冲印".takeIf { rig.printOnRelease },
+                        ).joinToString(" · "),
+                        Type.caption,
+                    )
+                }
+                if (facts?.flash == true) {
+                    Box(
+                        Modifier.pressable(onClick = rig::cycleFlash).padding(horizontal = 8.dp, vertical = 6.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Glyph.Flash, tint = if (rig.flash == 0) Ink.Dim else Ink.Amber, size = 20.dp)
+                            if (rig.flash == 1) Txt("A", Type.edgeSmall, color = Ink.Amber)
+                        }
+                    }
                 }
                 if (rig.mode == Mode.Photo && facts?.raw == true) {
                     Txt(
@@ -224,6 +288,37 @@ fun CameraScreen(library: Library, onBack: () -> Unit, onOpen: (Long) -> Unit) {
                         )
                     } else {
                         AndroidView({ finder }, Modifier.fillMaxSize())
+                    }
+                    if (rig.mode == Mode.Photo && (rig.look.aspect.isNotEmpty() || rig.grid)) {
+                        val aspect = rig.look.aspect
+                        val lines = rig.grid
+                        Canvas(Modifier.fillMaxSize()) {
+                            // the sensor is 4:3 and the screen is upright: the picture fills the width or the height
+                            val k = minOf(size.width / 3f, size.height / 4f)
+                            val pw = 3f * k
+                            val ph = 4f * k
+                            val cut = Aspects.rect(3000, 4000, aspect)
+                            val w = pw * cut[2] / 3000f
+                            val h = ph * cut[3] / 4000f
+                            val x = (size.width - w) / 2f
+                            val y = (size.height - h) / 2f
+                            if (aspect.isNotEmpty()) {
+                                // what will be cut away is dimmed, not hidden: the photographer sees what is just outside
+                                val shade = Color.Black.copy(alpha = 0.62f)
+                                drawRect(shade, Offset(0f, 0f), Size(size.width, y))
+                                drawRect(shade, Offset(0f, y + h), Size(size.width, size.height - y - h))
+                                drawRect(shade, Offset(0f, y), Size(x, h))
+                                drawRect(shade, Offset(x + w, y), Size(size.width - x - w, h))
+                                drawRect(Color.White.copy(alpha = 0.7f), Offset(x, y), Size(w, h), style = Stroke(1.dp.toPx()))
+                            }
+                            if (lines) {
+                                val line = Color.White.copy(alpha = 0.32f)
+                                for (i in 1..2) {
+                                    drawLine(line, Offset(x + w * i / 3f, y), Offset(x + w * i / 3f, y + h), 1.dp.toPx())
+                                    drawLine(line, Offset(x, y + h * i / 3f), Offset(x + w, y + h * i / 3f), 1.dp.toPx())
+                                }
+                            }
+                        }
                     }
                     var mark by remember { mutableStateOf<Offset?>(null) }
                     val markAlpha = remember { Animatable(0f) }
@@ -309,7 +404,17 @@ fun CameraScreen(library: Library, onBack: () -> Unit, onOpen: (Long) -> Unit) {
 
                 // ---- the dial of the chosen setting, over the foot of the viewfinder
                 val open = dial
-                if (open != null && facts != null) {
+                if (open == "aspect") {
+                    Box(
+                        Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(68.dp).background(Ink.Body.copy(alpha = 0.88f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        ChoiceStrip(
+                            Aspects.all.filter { it.id != "4:3" }.map { Choice(it.id, if (it.id.isEmpty()) "4:3 全幅" else it.id) }, rig.look.aspect,
+                            { rig.change(rig.look.copy(aspect = it)) },
+                        )
+                    }
+                } else if (open != null && facts != null) {
                     Box(
                         Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(68.dp).background(Ink.Body.copy(alpha = 0.88f)),
                         contentAlignment = Alignment.Center,
@@ -367,6 +472,9 @@ fun CameraScreen(library: Library, onBack: () -> Unit, onOpen: (Long) -> Unit) {
                         val (value, changed) = readout(id, rig, facts)
                         ParamChip(DIAL_NAMES.getValue(id), value, changed, selected = dial == id, onClick = { dial = if (dial == id) null else id })
                     }
+                    if (rig.mode == Mode.Photo) {
+                        ParamChip("构图线", if (rig.grid) "开" else "关", changed = rig.grid, selected = false, onClick = rig::toggleGrid)
+                    }
                 }
             }
 
@@ -422,19 +530,54 @@ fun CameraScreen(library: Library, onBack: () -> Unit, onOpen: (Long) -> Unit) {
         Notice(rig.notice, { rig.notice = null }, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 150.dp))
 
         Sheet(loading, { loading = false }) {
-            Txt("相机里装哪一卷", Type.heading)
-            Gap(height = 4.dp)
-            Txt("拍下的照片是原片，这卷胶片决定取景的样子和默认的冲洗方式，之后在暗房里可以换。视频会直接录成这卷胶片的样子。", Type.label, color = Ink.Dim, maxLines = 4)
-            Gap(height = 14.dp)
-            StockStrip(filmStocks(), rig.look.film, { rig.load(it) })
-            Gap(height = 10.dp)
+            // the back of the camera: what is loaded, what it writes on the film, and what happens after the release
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                for ((i, name) in listOf("胶片", "片边与日期", "拍摄").withIndex()) {
+                    Box(Modifier.pressable { back = i }.padding(end = 18.dp, top = 4.dp, bottom = 8.dp)) {
+                        Txt(name, Type.heading, color = if (i == back) Ink.Text else Ink.Dim)
+                    }
+                }
+            }
+            when (back) {
+                0 -> {
+                    Txt("拍下的照片是原片，这卷胶片决定取景的样子和默认的冲洗方式，之后在暗房里可以换。视频会直接录成这卷胶片的样子。", Type.label, color = Ink.Dim, maxLines = 4)
+                    Gap(height = 14.dp)
+                    StockStrip(filmStocks(), rig.look.film, { rig.load(it) })
+                    Gap(height = 12.dp)
+                    Txt("片幅", Type.caption)
+                    Gap(height = 6.dp)
+                    ChoiceStrip(Format.entries.map { Choice(it.id, it.label) }, rig.look.format, { rig.change(rig.look.copy(format = it)) })
+                    if (saved.isNotEmpty()) {
+                        Gap(height = 12.dp)
+                        Txt("装入配方", Type.caption)
+                        Gap(height = 6.dp)
+                        ChoiceStrip(saved.map { Choice(it.id.toString(), it.name) }, "", { id ->
+                            saved.firstOrNull { it.id.toString() == id }?.let { rig.change(rig.look.withRecipe(it.look)) }
+                        })
+                    }
+                    Gap(height = 10.dp)
+                }
+                1 -> {
+                    EdgeBench(rig.look, null, rig::change, {})
+                    Txt("片边和日期印在成片上；取景里看不到它们。", Type.caption, Modifier.padding(top = 6.dp), maxLines = 2)
+                    Gap(height = 6.dp)
+                }
+                else -> {
+                    SettingRow("拍下即冲印", "每拍一张，原片存进片库，同时在后台按相机里的设置冲印一张长边 3072 的成片，存进相册。") {
+                        Toggle(rig.printOnRelease, rig::printOnRelease, "拍下即冲印")
+                    }
+                    SettingRow("系统相机", "有的手机把长焦等镜头留给自带的相机。在那里拍，照片完整地回到这里，按同样的设置入库和冲印。") {
+                        Pill("打开", { loading = false; openSystemCamera() })
+                    }
+                }
+            }
         }
     }
 }
 
 private val VIDEO_RATES = listOf(24, 25, 30, 60)
 
-private val DIAL_NAMES = mapOf("ev" to "曝光补偿", "iso" to "感光度", "shutter" to "快门", "focus" to "对焦", "wb" to "白平衡")
+private val DIAL_NAMES = mapOf("aspect" to "画幅", "ev" to "曝光补偿", "iso" to "感光度", "shutter" to "快门", "focus" to "对焦", "wb" to "白平衡")
 
 /** The settings this camera can take, in the order they are shown. */
 private fun dialsOf(f: CameraFacts): List<String> = buildList {
@@ -449,6 +592,7 @@ private fun dialsOf(f: CameraFacts): List<String> = buildList {
 
 /** What a chip shows, and whether the person has taken the setting over from the camera. */
 private fun readout(id: String, rig: CameraRig, f: CameraFacts?): Pair<String, Boolean> = when (id) {
+    "aspect" -> (if (rig.look.aspect.isEmpty()) "4:3" else rig.look.aspect) to rig.look.aspect.isNotEmpty()
     "ev" -> Dials.ev(rig.ev * (f?.evStep ?: 0f)) to (rig.ev != 0)
     "iso" -> Dials.iso(rig.iso ?: rig.liveIso) to (rig.iso != null)
     "shutter" -> Dials.shutter(rig.shutter ?: rig.liveShutter) to (rig.shutter != null)

@@ -1062,9 +1062,12 @@ struct Engine::Impl {
         const float* rgb = rgb_in;
         int w = w_in, h = h_in;
         std::vector<float> cut;
+        double edge_long_mm = 0;
         if (ov) {
             int cx, cy, cw, chh;
-            overscan_gate_crop(p.overscan.format, w_in, h_in, cx, cy, cw, chh);
+            // Latent: overscan_frame, so that an open gate keeps the whole picture
+            if (!overscan_frame(p.overscan, w_in, h_in, cx, cy, cw, chh, edge_long_mm))
+                throw std::string("overscan: unknown format '" + p.overscan.format + "'");
             if (cw != w_in || chh != h_in) {
                 cut.resize((size_t)cw * chh * 3);
                 for (int y = 0; y < chh; y++)
@@ -1077,9 +1080,7 @@ struct Engine::Impl {
         }
         // ResizingService.crop_and_rescale: pixel pitch from the long edge --
         // with Film Edge, the gate's long edge (Pipeline::set_source_long_edge)
-        double gate_long = 0, gate_short = 0;
-        const double long_mm = ov && overscan_gate_mm(p.overscan.format, gate_long, gate_short)
-                                   ? gate_long : (double)p.film_format_mm;
+        const double long_mm = ov ? edge_long_mm : (double)p.film_format_mm;
         const double pixel_um = long_mm * 1000.0 / std::max(w, h);
         OverscanLayout L;
         const OverscanLayout* lp = nullptr;
@@ -1133,14 +1134,13 @@ bool render_output_size(int w, int h, const RenderParams& p, int& out_w, int& ou
     out_h = h;
     if (!p.overscan.active) return true;
     int cx, cy, cw, ch;
-    overscan_gate_crop(p.overscan.format, w, h, cx, cy, cw, ch);
-    double gate_long = 0, gate_short = 0;
-    if (!overscan_gate_mm(p.overscan.format, gate_long, gate_short)) {
+    double long_mm = 0;
+    if (!overscan_frame(p.overscan, w, h, cx, cy, cw, ch, long_mm)) {
         error = "overscan: unknown format '" + p.overscan.format + "'";
         return false;
     }
     OverscanLayout L;
-    if (!overscan_layout(p.overscan, gate_long / std::max(cw, ch), (uint32_t)cw, (uint32_t)ch, L, error)) return false;
+    if (!overscan_layout(p.overscan, long_mm / std::max(cw, ch), (uint32_t)cw, (uint32_t)ch, L, error)) return false;
     out_w = (int)L.canvas_w;
     out_h = (int)L.canvas_h;
     return true;

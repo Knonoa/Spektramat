@@ -7,12 +7,13 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import android.util.Log
+import com.spektra.latent.Journal
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.engine.StageListener
 import com.spektra.latent.model.Look
+import com.spektra.latent.model.Shooting
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -45,11 +46,14 @@ object Printer {
         onStage: (Int) -> Unit,
     ): Printed = withContext(Dispatchers.IO) {
         onStage(0)
-        val edge = if (longEdge >= frame.longEdge) 0 else longEdge
-        val print: Bitmap = Decoder.decode(frame.file, edge, look.lensShading).use { original ->
+        val edge = if (longEdge >= look.frameSize(frame.width, frame.height).max()) 0 else longEdge
+        val shooting = if (look.edge.on || look.date.on) Shooting.of(frame) else null
+        val print: Bitmap = Decoder.decode(frame.file, edge, look.lensShading, look.aspect).use { original ->
             // the engine's grain and halation are sized on the film: the same frame, whatever the print's size
             FilmEngine.develop(
-                original, look.grade(frame.meteredEv), look.order(seed = frame.id * 7919L + 1L),
+                original, look.grade(frame.meteredEv),
+                look.order(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number),
+                look.finish(), look.finishTable(),
                 object : StageListener {
                     override fun onStage(stage: Int) = onStage(stage)
                 },
@@ -128,7 +132,7 @@ object Printer {
                 to.saveAttributes()
             }
         } catch (e: Exception) {
-            Log.w(TAG, "the print was saved without its shooting data", e)
+            Journal.w(TAG, "the print was saved without its shooting data", e)
         }
     }
 

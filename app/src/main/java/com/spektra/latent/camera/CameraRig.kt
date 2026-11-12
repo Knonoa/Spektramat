@@ -15,7 +15,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
-import android.util.Log
+import com.spektra.latent.Journal
 import android.util.Range
 import android.util.Size
 import android.view.Surface
@@ -162,6 +162,15 @@ class CameraRig(context: Context, private val library: Library, private val scop
     var lastShot by mutableStateOf<Frame?>(null); private set
     var notice by mutableStateOf<String?>(null)
 
+    /** Thirds drawn over the viewfinder. */
+    var grid by mutableStateOf(prefs.getBoolean("grid", false)); private set
+    /** Every photograph is sent to be printed as soon as it is filed. */
+    var printOnRelease by mutableStateOf(prefs.getBoolean("printOnRelease", false)); private set
+    /** 0 off, 1 when the camera thinks it is needed, 2 always. In video, 2 is a steady light. */
+    var flash by mutableIntStateOf(0); private set
+    /** Told about every photograph once it is in the library. */
+    var onFiled: ((Frame) -> Unit)? = null
+
     val manualExposure: Boolean get() = iso != null || shutter != null
 
     init {
@@ -185,7 +194,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
             if (s.back.isEmpty()) front = true
             bind()
         } catch (e: Exception) {
-            Log.e(TAG, "camera did not start", e)
+            Journal.e(TAG, "camera did not start", e)
             status = RigStatus.Failed(e.message ?: "相机没有打开。")
         }
     }
@@ -197,7 +206,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
         try {
             provider?.unbindAll()
         } catch (e: Exception) {
-            Log.w(TAG, "unbind failed", e)
+            Journal.w(TAG, "unbind failed", e)
         }
         camera = null
         imageCapture = null
@@ -308,7 +317,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
             status = RigStatus.Running
             restarted = false
         } catch (e: Exception) {
-            Log.e(TAG, "camera could not be set up", e)
+            Journal.e(TAG, "camera could not be set up", e)
             if (retry) {
                 // The phone's camera service may have restarted since the cameras were looked over
                 // (it does after a crash): what was learnt then is void. Look again, once.
@@ -344,7 +353,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
         camera = null
         imageCapture = null
         videoCapture = null
-        Log.w(TAG, "restarting CameraX")
+        Journal.w(TAG, "restarting CameraX")
         p.shutdownAsync().addListener({
             provider = null
             survey = null
@@ -359,7 +368,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
     private val watch = Observer<CameraState> { state ->
         val error = state.error ?: return@Observer
         if (error.type != CameraState.ErrorType.CRITICAL) return@Observer
-        Log.w(TAG, "camera error ${error.code}", error.cause)
+        Journal.w(TAG, "camera error ${error.code}", error.cause)
         when (error.code) {
             CameraState.ERROR_CAMERA_DISABLED -> status = RigStatus.Failed("这台设备的管理策略禁用了相机。")
             CameraState.ERROR_DO_NOT_DISTURB_MODE_ENABLED -> status = RigStatus.Failed("勿扰模式下相机打不开，关掉勿扰模式再试。")
@@ -418,6 +427,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
     fun switchMode(next: Mode) {
         if (next == mode || recording || shooting) return
         mode = next
+        flash = 0
         bind()
     }
 
@@ -494,7 +504,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
                 FocusMeteringAction.Builder(point).setAutoCancelDuration(4, TimeUnit.SECONDS).build(),
             )
         } catch (e: Exception) {
-            Log.w(TAG, "focus at a point is not available", e)
+            Journal.w(TAG, "focus at a point is not available", e)
         }
     }
 
@@ -520,7 +530,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
         try {
             Camera2CameraControl.from(cam.cameraControl).setCaptureRequestOptions(options.build())
         } catch (e: Exception) {
-            Log.w(TAG, "manual settings were not taken", e)
+            Journal.w(TAG, "manual settings were not taken", e)
         }
     }
 
@@ -543,11 +553,43 @@ class CameraRig(context: Context, private val library: Library, private val scop
 
     // ---- the film in the camera
 
-    fun load(filmId: String) {
-        val next = look.withFilm(filmId)
+    fun load(filmId: String) = change(look.withFilm(filmId))
+
+    /** Everything else about the loaded film: its format, its edge, the date back, a recipe, the shape of the picture. */
+    fun change(next: Look) {
+        if (next == look) return
         look = next
         film.look = next
         prefs.edit().putString("look", next.toJson().toString()).apply()
+    }
+
+    fun toggleGrid() {
+        grid = !grid
+        prefs.edit().putBoolean("grid", grid).apply()
+    }
+
+    fun printOnRelease(on: Boolean) {
+        printOnRelease = on
+        prefs.edit().putBoolean("printOnRelease", on).apply()
+    }
+
+    fun cycleFlash() {
+        if (facts?.flash != true) return
+        flash = if (mode == Mode.Video) (if (flash == 2) 0 else 2) else (flash + 1) % 3
+        if (mode == Mode.Video) camera?.cameraControl?.enableTorch(flash == 2)
+    }
+
+    /** A photograph that came from somewhere else -- the phone's own camera app -- filed like one this camera took. */
+    fun file(shot: File, name: String) {
+        scope.launch {
+            val frame = library.addCapture(shot, name, look, metered = 0f)
+            if (frame != null) {
+                lastShot = frame
+                onFiled?.invoke(frame)
+            } else {
+                notice = "系统相机拍的这一张没有存下来。"
+            }
+        }
     }
 
     // ---- photographs
@@ -592,6 +634,11 @@ class CameraRig(context: Context, private val library: Library, private val scop
         // A RAW is metered like any other RAW, and the compensation that was dialled in goes with it as the look's exposure.
         val compensation = ev * (facts?.evStep ?: 0f)
         val shotLook = if (asRaw) look.copy(exposure = compensation) else look
+        capture.flashMode = when (flash) {
+            1 -> ImageCapture.FLASH_MODE_AUTO
+            2 -> ImageCapture.FLASH_MODE_ON
+            else -> ImageCapture.FLASH_MODE_OFF
+        }
         capture.takePicture(
             ImageCapture.OutputFileOptions.Builder(file).build(), io,
             object : ImageCapture.OnImageSavedCallback {
@@ -599,12 +646,17 @@ class CameraRig(context: Context, private val library: Library, private val scop
                     scope.launch {
                         val frame = library.addCapture(file, name, shotLook, metered = if (asRaw) null else 0f)
                         shooting = false
-                        if (frame != null) lastShot = frame else notice = "这一张没有存下来。"
+                        if (frame != null) {
+                            lastShot = frame
+                            onFiled?.invoke(frame)
+                        } else {
+                            notice = "这一张没有存下来。"
+                        }
                     }
                 }
 
                 override fun onError(e: ImageCaptureException) {
-                    Log.e(TAG, "capture failed", e)
+                    Journal.e(TAG, "capture failed", e)
                     file.delete()
                     main.execute {
                         shooting = false
@@ -669,7 +721,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
                     tape = null
                     videoCapture?.targetRotation = rotation
                     notice = if (event.hasError() && event.error != VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE) {
-                        Log.e(TAG, "recording ended with error ${event.error}", event.cause)
+                        Journal.e(TAG, "recording ended with error ${event.error}", event.cause)
                         "这段视频没有保存下来。"
                     } else if (Build.VERSION.SDK_INT >= 29) {
                         "视频已保存到相册的 Latent 相簿。"

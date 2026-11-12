@@ -53,6 +53,16 @@ import com.spektra.latent.LatentApp
 import com.spektra.latent.data.Frame
 import com.spektra.latent.data.Library
 import com.spektra.latent.ui.FileImage
+import com.spektra.latent.ui.GlyphField
+import com.spektra.latent.ui.GlyphSubject
+import com.spektra.latent.ui.ScrambleText
+import com.spektra.latent.ui.darkroom.recipeLine
+import com.spektra.latent.data.PrintDesk
+import com.spektra.latent.data.Recipes
+import com.spektra.latent.tether.Monitor
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import com.spektra.latent.ui.Gap
 import com.spektra.latent.ui.Glyph
 import com.spektra.latent.ui.Icon
@@ -78,6 +88,11 @@ fun LibraryScreen(
     onImportTaken: () -> Unit,
     onOpen: (Long) -> Unit,
     onCamera: () -> Unit,
+    onMonitor: () -> Unit,
+    onTable: () -> Unit,
+    prints: PrintDesk,
+    recipes: Recipes,
+    monitor: Monitor,
 ) {
     val app = LocalContext.current.applicationContext as LatentApp
     val scope = rememberCoroutineScope()
@@ -88,6 +103,10 @@ fun LibraryScreen(
     var chooseSource by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
+    var printing by remember { mutableStateOf(false) }
+    var applying by remember { mutableStateOf(false) }
+    val saved by recipes.all.collectAsStateWithLifecycle()
+    fun chosen() = rolls.flatMap { it.frames }.filter { it.id in selection }
 
     // an import belongs to the app, not to this screen: it goes on if the person walks into the darkroom
     fun import(uris: List<Uri>) {
@@ -121,12 +140,15 @@ fun LibraryScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (selection.isEmpty()) {
-                    Txt("片库", Type.title, Modifier.weight(1f))
+                    ScrambleText("冲印室", Type.title, Modifier.weight(1f))
                     if (rolls.isNotEmpty()) Pill("导入", { chooseSource = true })
                 } else {
                     IconButton(Glyph.Close, "取消选择", { selection = emptySet() })
                     Txt("已选 ${selection.size} 张", Type.heading, Modifier.weight(1f).padding(start = 4.dp))
+                    IconButton(Glyph.Recipe, "给选中的照片套用配方", { applying = true })
                     IconButton(Glyph.Trash, "删除", { confirmDelete = true }, tint = Ink.Red)
+                    Gap(width = 4.dp)
+                    Pill("冲印", { printing = true }, filled = true)
                 }
             }
             importing?.let { (done, total) ->
@@ -138,7 +160,7 @@ fun LibraryScreen(
             }
 
             if (rolls.isEmpty() && importing == null) {
-                Empty(onPhotos = ::pickPhotos, onFiles = ::pickFiles)
+                Box(Modifier.fillMaxSize()) { Empty(onPhotos = ::pickPhotos, onFiles = ::pickFiles) }
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(100.dp),   // three across on a phone, more on wider screens
@@ -173,23 +195,24 @@ fun LibraryScreen(
             }
         }
 
-        // ---- the way to the camera (and, later, to a tethered one): the library is home, these start from it
+        // ---- the other three places. This one is home; each of them is walked into from here and left back to here.
         if (selection.isEmpty()) {
             Row(
                 Modifier
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
                     .padding(bottom = 18.dp)
-                    .pressable(onClick = onCamera)
                     .clip(RoundedCornerShape(50))
                     .background(Ink.Raised)
                     .border(1.dp, Ink.Line, RoundedCornerShape(50))
-                    .padding(horizontal = 24.dp, vertical = 13.dp),
+                    .padding(horizontal = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Glyph.Camera, size = 20.dp)
-                Gap(width = 8.dp)
-                Txt("相机", Type.label)
+                Place(Glyph.Monitor, "监视器", onMonitor, lit = monitor.connected)
+                Box(Modifier.width(1.dp).height(20.dp).background(Ink.Line))
+                Place(Glyph.Camera, "相机", onCamera)
+                Box(Modifier.width(1.dp).height(20.dp).background(Ink.Line))
+                Place(Glyph.Table, "观片台", onTable)
             }
         }
 
@@ -202,6 +225,54 @@ fun LibraryScreen(
             Gap(height = 16.dp)
             SheetRow("从相册选照片", "JPEG、HEIF、PNG") { chooseSource = false; pickPhotos() }
             SheetRow("从文件选 RAW", "DNG、ARW、CR2 / CR3、NEF、RAF、RW2、ORF …") { chooseSource = false; pickFiles() }
+        }
+
+        // ---- printing everything that is selected, each with its own settings
+        Sheet(printing, { printing = false }) {
+            Txt("冲印这 ${selection.size} 张", Type.heading)
+            Gap(height = 4.dp)
+            Txt("每一张按它自己现在的设置冲印，在后台一张接一张地做，成片保存到相册的 Latent 相簿。尺寸是长边的像素数。", Type.label, color = Ink.Dim, maxLines = 3)
+            Gap(height = 14.dp)
+            for ((edge, note) in listOf(2048 to "适合手机上看和分享", 3072 to "适合大屏", 4096 to "适合小幅打印", 0 to "各自的原尺寸")) {
+                Row(
+                    Modifier.fillMaxWidth().pressable {
+                        val frames = chosen()
+                        printing = false
+                        selection = emptySet()
+                        for (f in frames) prints.order(f, f.look, if (edge == 0) f.longEdge else edge)
+                        notice = "${frames.size} 张已经排进冲印队列。"
+                    }.padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Txt(if (edge == 0) "原尺寸" else "$edge", Type.edgeLarge, Modifier.width(96.dp))
+                    Txt(note, Type.label, color = Ink.Dim)
+                }
+            }
+        }
+
+        // ---- one recipe on everything that is selected
+        Sheet(applying, { applying = false }) {
+            Txt("给这 ${selection.size} 张套用配方", Type.heading)
+            Gap(height = 4.dp)
+            Txt("配方换掉胶片、片边、日期、印相和整饰；每张照片自己的校正和画幅不动。配方在暗房里保存。", Type.label, color = Ink.Dim, maxLines = 3)
+            Gap(height = 10.dp)
+            if (saved.isEmpty()) Txt("还没有配方。进暗房调好一张，点书签保存。", Type.label, Modifier.padding(vertical = 14.dp), color = Ink.Faint, maxLines = 2)
+            Column(Modifier.fillMaxWidth().heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
+                for (r in saved) {
+                    Column(
+                        Modifier.fillMaxWidth().pressable {
+                            val frames = chosen()
+                            applying = false
+                            selection = emptySet()
+                            app.scope.launch { for (f in frames) library.saveLook(f.id, f.look.withRecipe(r.look)) }
+                            notice = "「${r.name}」已经用在 ${frames.size} 张照片上。"
+                        }.padding(vertical = 10.dp),
+                    ) {
+                        Txt(r.name, Type.body)
+                        Txt(recipeLine(r.look), Type.edgeSmall)
+                    }
+                }
+            }
         }
 
         Sheet(confirmDelete, { confirmDelete = false }) {
@@ -253,6 +324,16 @@ private fun FrameCell(frame: Frame, selected: Boolean, onClick: () -> Unit, onLo
     }
 }
 
+/** One of the places the dock leads to. [lit]: something is going on there right now. */
+@Composable
+private fun Place(glyph: Glyph, name: String, onClick: () -> Unit, lit: Boolean = false) {
+    Row(Modifier.pressable(onClick = onClick).padding(horizontal = 16.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(glyph, size = 20.dp, tint = if (lit) Ink.Amber else Ink.Text)
+        Gap(width = 7.dp)
+        Txt(name, Type.label, color = if (lit) Ink.Amber else Ink.Text)
+    }
+}
+
 @Composable
 private fun SheetRow(title: String, detail: String, onClick: () -> Unit) {
     Column(Modifier.fillMaxWidth().pressable(onClick = onClick).padding(vertical = 12.dp)) {
@@ -265,6 +346,8 @@ private fun SheetRow(title: String, detail: String, onClick: () -> Unit) {
 /** Nothing here yet: say what goes here and how to put it in. */
 @Composable
 private fun Empty(onPhotos: () -> Unit, onFiles: () -> Unit) {
+    // the empty room, in characters
+    GlyphField(GlyphSubject.Room, Modifier.fillMaxSize(), strength = 0.8f)
     Column(
         Modifier.fillMaxSize().padding(horizontal = 36.dp).padding(bottom = 72.dp),
         horizontalAlignment = Alignment.CenterHorizontally,

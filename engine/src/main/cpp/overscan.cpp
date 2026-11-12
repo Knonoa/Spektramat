@@ -95,6 +95,15 @@ const Format* find_format(const std::string& name) {
     return nullptr;
 }
 
+// Latent, the open gate. The film runs along the picture's long side, except
+// in the formats whose frame stands across the film (half frame, 645): there
+// it runs along the short side, as it does in those cameras.
+bool open_vertical(const Format& f, uint32_t w, uint32_t h) { return (w >= h) == (f.along < f.across); }
+// The picture reaches from one edge of the film to the other.
+double open_px(const Format& f, uint32_t w, uint32_t h) {
+    return f.film_w / double(std::max(1u, open_vertical(f, w, h) ? w : h));
+}
+
 // --- the film edge, per stock (reference_film/, measured 2026-10-03) --------
 // What the manufacturer printed on the rebate before the film left the
 // factory: which layout, and the printer's light. Measured on the owner's
@@ -898,8 +907,10 @@ const char* const* tiny_glyph(const std::string& text, size_t& i) {
 // skeleton, zero slashed: sampling "PRO400H" and "145 3" on a 5 x 7 grid
 // gives exactly those glyphs, on 7 x 9 it gives mush), with RDP's III as three strokes in one cell.
 const char* const* matrix57_glyph(const std::string& text, size_t& i) {
-    static char buf[7][6];
-    static const char* rows[7];
+    // Latent: per thread, because a print, a proof and a thumbnail may each be drawing an edge at once.
+    // Storage only; what is drawn is unchanged.
+    static thread_local char buf[7][6];
+    static thread_local const char* rows[7];
     // three plain strokes in one cell, no bars across them (the owner, 2026-10-04: "the I in real 120
     // should be just three straight lines without the extending outward side"; RDPIII_645.png)
     static const uint8_t kRoman3[7] = {0x15, 0x15, 0x15, 0x15, 0x15, 0x15, 0x15};
@@ -1656,9 +1667,18 @@ void imprint_groups(const OverscanLayout& L, const Params& params, double frame_
         return dot_matrix(text, h, [](double, double, double) {});
     };
 
-    const double gw = L.valid ? L.gate_along : frame_w_mm, gh = L.valid ? L.gate_across : frame_h_mm;
-    const double gs = L.valid ? L.gate_s0 : 0.0, gt = L.valid ? L.gate_t0 : 0.0;
-    const double gap = L.valid ? std::max(0.6, (L.vertical ? L.canvas_h : L.canvas_w) * L.px - L.gate_along - L.pair_adv) * 0.5 : 0.0;
+    // With the gate open the frame is the whole film, but a back still prints
+    // where its own frame would be: inside the band the format's gate leaves,
+    // clear of the perforations and the edge print. And there is no film
+    // between frames to print on.
+    const bool open = L.valid && L.open;
+    const double band = open ? std::min(L.nominal_across, L.film_w) : 0.0;
+    const double gw = L.valid ? L.gate_along : frame_w_mm;
+    const double gh = open ? band : (L.valid ? L.gate_across : frame_h_mm);
+    const double gs = L.valid ? L.gate_s0 : 0.0;
+    const double gt = open ? 0.5 * (L.film_w - band) : (L.valid ? L.gate_t0 : 0.0);
+    const bool gapped = L.valid && !open;
+    const double gap = gapped ? std::max(0.6, (L.vertical ? L.canvas_h : L.canvas_w) * L.px - L.gate_along - L.pair_adv) * 0.5 : 0.0;
     if (is120) {
         // One line in the margin beside the frame, reading along the film,
         // ~0.3 mm off the gate, on the side away from the stock name (645N):
@@ -1688,9 +1708,9 @@ void imprint_groups(const OverscanLayout& L, const Params& params, double frame_
         const double t_c = gt + 0.5 * gh + 0.5 * w;
         draw(text, style, h, [&](double x, double y, double& ss, double& tt) { ss = s_c + 0.5 * h - y; tt = t_c - x; });
     };
-    const bool data_drawn = !data_text.empty() && L.valid;
+    const bool data_drawn = !data_text.empty() && gapped;
     if (data_drawn) between(data_text, "data", 0.50 * k, false);
-    if (!date_text.empty() && d.placement == "rebate" && L.valid) {
+    if (!date_text.empty() && d.placement == "rebate" && gapped) {
         between(date_text, d.style, 0.55 * k, data_drawn);
     } else if (!date_text.empty() || (d.data_in_frame && !data_drawn && !data_text.empty())) {
         // In the frame, at the chosen corner of the *film's* frame (the corner
@@ -2053,9 +2073,10 @@ bool overscan_layout(const OverscanParams& o, double px_mm, uint32_t frame_w, ui
     const Format* fmt = find_format(o.format);
     if (!fmt) { error = "overscan: unknown format '" + o.format + "' (" + kFormatNames + ")"; return false; }
     if (o.mode != "strip" && o.mode != "filed") { error = "overscan: unknown mode '" + o.mode + "' (strip, filed)"; return false; }
-    bool family_ok = o.gate == "auto";
+    const bool open = o.gate == "open";
+    bool family_ok = o.gate == "auto" || open;
     for (const char* f : kGateFamilies) family_ok = family_ok || o.gate == f;
-    if (!family_ok) { error = "overscan: unknown gate '" + o.gate + "' (auto, square, rounded, eared, shouldered, kicked)"; return false; }
+    if (!family_ok) { error = "overscan: unknown gate '" + o.gate + "' (auto, square, rounded, eared, shouldered, kicked, open)"; return false; }
     if (o.holes != "white" && o.holes != "black") { error = "overscan: unknown holes '" + o.holes + "' (white, black)"; return false; }
     if (o.carrier != "none" && o.carrier != "black" && o.carrier != "open") {
         error = "overscan: unknown carrier '" + o.carrier + "' (none, black, open)";
@@ -2063,8 +2084,9 @@ bool overscan_layout(const OverscanParams& o, double px_mm, uint32_t frame_w, ui
     }
     // The frame is the gate: its long edge is the format's, and its shape has
     // to be the gate's, either way up. Any other shape was laid out as if it
-    // were, and the picture was cut by the film's width.
-    {
+    // were, and the picture was cut by the film's width. (With the gate open
+    // there is no gate to match: the picture keeps its shape.)
+    if (!open) {
         const bool pair = false;   // Android: no half-frame pairs
         if (pair && std::string(fmt->name) != "135_half") {
             error = "overscan: a pair is two half frames; overscan_pair needs overscan_format = 135_half";
@@ -2084,14 +2106,17 @@ bool overscan_layout(const OverscanParams& o, double px_mm, uint32_t frame_w, ui
     }
     L = OverscanLayout{};
     L.format = fmt->name;
-    L.px = px_mm;
+    L.open = open;
+    L.nominal_across = fmt->across;
+    L.px = open ? open_px(*fmt, frame_w, frame_h) : px_mm;
     L.frame_w = frame_w;
     L.frame_h = frame_h;
     const double img_w = frame_w * L.px, img_h = frame_h * L.px;
     // The film runs along the image axis whose size is *not* the format's
     // across-the-film size: a portrait 135 frame, a landscape 645, a portrait
     // 6x7 all run vertically. Square frames run horizontally.
-    L.vertical = std::fabs(img_w - fmt->across) < std::fabs(img_h - fmt->across) && std::fabs(img_w - img_h) > 1e-6;
+    L.vertical = open ? open_vertical(*fmt, frame_w, frame_h)
+                      : std::fabs(img_w - fmt->across) < std::fabs(img_h - fmt->across) && std::fabs(img_w - img_h) > 1e-6;
     L.gate_along = L.vertical ? img_h : img_w;
     if (false) {   // Android: no half-frame pairs
         // Held level the two frames sit side by side; with the camera turned
@@ -2106,12 +2131,15 @@ bool overscan_layout(const OverscanParams& o, double px_mm, uint32_t frame_w, ui
     OsRng rc(stream(cam, kCamera, 1)), rf(stream(frm ^ (cam << 32), kFrame, 1));
 
     // --- film and gate ---------------------------------------------------
-    L.film_w = fmt->film_w + (fmt->perforated ? 0.0 : rc.uni(-0.15, 0.15));
+    // (Every draw is still made with the gate open, so a body's fog, leaks and
+    // perforation phase are the same whichever gate it is given.)
+    const double film_jitter = fmt->perforated ? 0.0 : rc.uni(-0.15, 0.15);
+    L.film_w = fmt->film_w + (open ? 0.0 : film_jitter);
     // Camera centring + weave. A 120 gate sits up to ~0.5 mm off the film's
     // middle (reference_film/120: rebates of 2.26/3.28, 2.48/2.60, 2.51/2.99,
     // 2.4/3.1 and 1.9/2.64 mm); a 135 gate is held by the perforations.
     const double t_off = (fmt->perforated ? rc.uni(-0.10, 0.10) : rc.uni(-0.45, 0.45)) + rf.normal() * 0.025;
-    L.gate_t0 = 0.5 * (L.film_w - L.gate_across) + t_off;
+    L.gate_t0 = open ? 0.0 : 0.5 * (L.film_w - L.gate_across) + t_off;
     L.gate_s0 = 0.0;
     for (int side = 0; side < 4; ++side)
         for (int k = 0; k < 3; ++k) {
@@ -2126,7 +2154,9 @@ bool overscan_layout(const OverscanParams& o, double px_mm, uint32_t frame_w, ui
 
     // --- the gate's shape: its own stream, so a new family never moves the
     // fog, the perforation phase or anything else this camera already draws.
-    {
+    if (open) {
+        L.gate_family = "open";
+    } else {
         OsRng rg(stream(cam, kCamera, 2));
         std::string family = o.gate;
         if (family == "auto") {
@@ -2159,7 +2189,7 @@ bool overscan_layout(const OverscanParams& o, double px_mm, uint32_t frame_w, ui
 
     // --- canvas ------------------------------------------------------------
     double margin_along, t_lo, t_hi;
-    if (o.mode == "strip") {
+    if (o.mode == "strip" || open) {
         // 135 full frame advances 8 perforations (38 mm) for a 36 mm gate: ~1 mm
         // a side shows. Half frame advances 4 (19 mm) for 18 mm: ~0.5 mm a side.
         margin_along = fmt->perforated ? (fmt->along < 20.0 ? rc.uni(0.40, 0.50) : rc.uni(0.75, 0.95))
@@ -2178,6 +2208,8 @@ bool overscan_layout(const OverscanParams& o, double px_mm, uint32_t frame_w, ui
         margin_along = 0.9 + rf.uni(-0.1, 0.1);
         t_lo = L.gate_t0 - 1.1; t_hi = L.gate_t0 + L.gate_across + 1.1;
     }
+    // The open gate: the canvas is the picture, which is the film from edge to edge.
+    if (open) { margin_along = 0.0; t_lo = 0.0; t_hi = L.film_w; }
     const uint32_t m_px = uint32_t(std::lround(margin_along / L.px));
     const uint32_t along_px = uint32_t(L.vertical ? frame_h : frame_w) + 2 * m_px;
     const uint32_t across_px = uint32_t(std::lround((t_hi - t_lo) / L.px));
@@ -2196,7 +2228,9 @@ bool overscan_layout(const OverscanParams& o, double px_mm, uint32_t frame_w, ui
     const double half_along = 0.5 * along_px * L.px;
     const double tilt_lim = std::min(0.35, std::asin(std::min(1.0, 0.27 / half_along)) * 180.0 / M_PI);
     L.scan_rot = std::clamp(rf.normal() * 0.14, -tilt_lim, tilt_lim) * M_PI / 180.0;
-    const double ds = rf.normal() * 0.08, dt = rf.normal() * 0.06;
+    double ds = rf.normal() * 0.08, dt = rf.normal() * 0.06;
+    // The open gate's canvas is the picture itself: it is copied, never turned or shifted.
+    if (open) { L.scan_rot = 0.0; ds = 0.0; dt = 0.0; }
     const double cu = 0.5 * L.canvas_w * L.px, cv = 0.5 * L.canvas_h * L.px;
     const double c = std::cos(L.scan_rot), sn = std::sin(L.scan_rot);
     // canvas (u, v) -> film (s, t): the scan rotation R, then for a vertical film
@@ -2222,6 +2256,7 @@ bool overscan_layout(const OverscanParams& o, double px_mm, uint32_t frame_w, ui
     // Gate flare (the gate's bevel), camera-dependent.
     L.flare_amp = rc.uni(0.10, 0.35);
     L.flare_width = rc.uni(0.03, 0.08);
+    if (open) L.flare_amp = 0.0;   // no gate, no bevel
     L.fog_seed = uint32_t(rf.next() & 0xFFFFFFu);
     L.fog_period = rc.uni(5.0, 11.0);
     // A count per length of film (C6): the same up to 6x9's canvas, more on a
@@ -2275,6 +2310,19 @@ void overscan_gate_crop(const std::string& format, int w, int h, int& cx, int& c
     if (std::fabs(r / target - 1.0) < 0.002) return;
     if (r > target) { cw = std::max(1, int(std::lround(h * target))); cx = (w - cw) / 2; }
     else            { ch = std::max(1, int(std::lround(w / target))); cy = (h - ch) / 2; }
+}
+
+bool overscan_frame(const OverscanParams& o, int w, int h, int& cx, int& cy, int& cw, int& ch, double& long_mm) {
+    cx = 0; cy = 0; cw = w; ch = h; long_mm = 0.0;
+    const Format* f = find_format(o.format);
+    if (!f || w <= 0 || h <= 0) return false;
+    if (o.gate == "open") {
+        long_mm = open_px(*f, uint32_t(w), uint32_t(h)) * std::max(w, h);
+        return true;
+    }
+    overscan_gate_crop(o.format, w, h, cx, cy, cw, ch);
+    long_mm = std::max(f->along, f->across);
+    return true;
 }
 
 void overscan_colours(const EngineData& data, const FilmProfile& film, int scan_view_illu,
@@ -2362,8 +2410,8 @@ void overscan_canvas(const OverscanLayout& L, const float* const frame[3], float
                 canvas_to_film(L, double(x), double(y), ss, st);
                 double e[3] = {0, 0, 0};
                 if (L.carrier_none || (st >= 0.0 && st <= W)) {
-                    const double d_gate = gate_sdf(L, ss, st);
-                    const double cov = penumbra(d_gate, L.penumbra);
+                    const double d_gate = L.open ? -1.0 : gate_sdf(L, ss, st);
+                    const double cov = L.open ? 1.0 : penumbra(d_gate, L.penumbra);
                     if (cov > 0.0) {
                         double fx, fy, f[3];
                         if (!L.vertical) { fx = (ss - L.gate_s0) / px - 0.5; fy = (st - L.gate_t0) / px - 0.5; }

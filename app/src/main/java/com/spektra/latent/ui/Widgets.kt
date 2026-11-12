@@ -84,7 +84,10 @@ fun Pill(
     }
 }
 
-enum class Glyph { Back, Undo, Redo, Plus, Check, Close, Share, Trash, Compare, Camera, Flip }
+enum class Glyph {
+    Back, Undo, Redo, Plus, Check, Close, Share, Trash, Compare, Camera, Flip,
+    Recipe, Monitor, Table, Loupe, Lamp, Lock, Front, Magnet, Arrange, Fit, Grid, Flash, Turn, Film,
+}
 
 /** Line icons drawn in a 24-unit box; no icon font, no dependency. */
 @Composable
@@ -140,6 +143,76 @@ fun Icon(glyph: Glyph, modifier: Modifier = Modifier, tint: Color = Ink.Text, si
             Glyph.Compare -> {
                 path { moveTo(4f * u, 5f * u); lineTo(20f * u, 5f * u); lineTo(20f * u, 19f * u); lineTo(4f * u, 19f * u); close() }
                 line(12f, 3f, 12f, 21f)
+            }
+            Glyph.Recipe -> path {
+                // a bookmark: a look kept for later
+                moveTo(7f * u, 4f * u); lineTo(17f * u, 4f * u); lineTo(17f * u, 20f * u); lineTo(12f * u, 16f * u); lineTo(7f * u, 20f * u); close()
+            }
+            Glyph.Monitor -> {
+                path { moveTo(3.5f * u, 5f * u); lineTo(20.5f * u, 5f * u); lineTo(20.5f * u, 16f * u); lineTo(3.5f * u, 16f * u); close() }
+                line(9f, 20f, 15f, 20f)
+                line(12f, 16f, 12f, 20f)
+            }
+            Glyph.Table -> {
+                // two sheets lying on a table, one turned
+                path { moveTo(4f * u, 7f * u); lineTo(13f * u, 5f * u); lineTo(15f * u, 13f * u); lineTo(6f * u, 15f * u); close() }
+                path { moveTo(11f * u, 11f * u); lineTo(20f * u, 11f * u); lineTo(20f * u, 19f * u); lineTo(11f * u, 19f * u); close() }
+            }
+            Glyph.Loupe -> {
+                drawCircle(tint, 5.6f * u, Offset(10.5f * u, 10.5f * u), style = stroke)
+                line(14.8f, 14.8f, 20f, 20f)
+            }
+            Glyph.Lamp -> {
+                drawArc(tint, 150f, 240f, false, Offset(6.5f * u, 3.5f * u), Size(11f * u, 11f * u), style = stroke)
+                path { moveTo(9.3f * u, 13.6f * u); lineTo(9.8f * u, 17f * u); lineTo(14.2f * u, 17f * u); lineTo(14.7f * u, 13.6f * u) }
+                line(10.3f, 20f, 13.7f, 20f)
+            }
+            Glyph.Lock -> {
+                path { moveTo(6f * u, 11f * u); lineTo(18f * u, 11f * u); lineTo(18f * u, 20f * u); lineTo(6f * u, 20f * u); close() }
+                drawArc(tint, 180f, 180f, false, Offset(8.5f * u, 4.5f * u), Size(7f * u, 9f * u), style = stroke)
+            }
+            Glyph.Front -> {
+                path { moveTo(4f * u, 4f * u); lineTo(14f * u, 4f * u); lineTo(14f * u, 14f * u); lineTo(4f * u, 14f * u); close() }
+                path { moveTo(17f * u, 10f * u); lineTo(20f * u, 10f * u); lineTo(20f * u, 20f * u); lineTo(10f * u, 20f * u); lineTo(10f * u, 17f * u) }
+            }
+            Glyph.Magnet -> {
+                path {
+                    moveTo(6f * u, 4f * u); lineTo(6f * u, 13f * u)
+                    cubicTo(6f * u, 21.5f * u, 18f * u, 21.5f * u, 18f * u, 13f * u)
+                    lineTo(18f * u, 4f * u); lineTo(14f * u, 4f * u); lineTo(14f * u, 13f * u)
+                    cubicTo(14f * u, 16f * u, 10f * u, 16f * u, 10f * u, 13f * u)
+                    lineTo(10f * u, 4f * u); close()
+                }
+                line(6f, 8f, 10f, 8f)
+                line(14f, 8f, 18f, 8f)
+            }
+            Glyph.Arrange -> {
+                for (cx in listOf(4.5f, 13.5f)) for (cy in listOf(4.5f, 13.5f)) {
+                    path { moveTo(cx * u, cy * u); lineTo((cx + 6f) * u, cy * u); lineTo((cx + 6f) * u, (cy + 6f) * u); lineTo(cx * u, (cy + 6f) * u); close() }
+                }
+            }
+            Glyph.Fit -> {
+                path { moveTo(4f * u, 9f * u); lineTo(4f * u, 4f * u); lineTo(9f * u, 4f * u) }
+                path { moveTo(15f * u, 4f * u); lineTo(20f * u, 4f * u); lineTo(20f * u, 9f * u) }
+                path { moveTo(20f * u, 15f * u); lineTo(20f * u, 20f * u); lineTo(15f * u, 20f * u) }
+                path { moveTo(9f * u, 20f * u); lineTo(4f * u, 20f * u); lineTo(4f * u, 15f * u) }
+            }
+            Glyph.Grid -> {
+                path { moveTo(4f * u, 4f * u); lineTo(20f * u, 4f * u); lineTo(20f * u, 20f * u); lineTo(4f * u, 20f * u); close() }
+                line(9.3f, 4f, 9.3f, 20f); line(14.7f, 4f, 14.7f, 20f)
+                line(4f, 9.3f, 20f, 9.3f); line(4f, 14.7f, 20f, 14.7f)
+            }
+            Glyph.Flash -> path {
+                moveTo(13.5f * u, 3f * u); lineTo(6.5f * u, 13f * u); lineTo(11.5f * u, 13f * u)
+                lineTo(10.5f * u, 21f * u); lineTo(17.5f * u, 11f * u); lineTo(12.5f * u, 11f * u); close()
+            }
+            Glyph.Turn -> {
+                drawArc(tint, -60f, 300f, false, Offset(5f * u, 5f * u), Size(14f * u, 14f * u), style = stroke)
+                path { moveTo(15.2f * u, 2.6f * u); lineTo(15.6f * u, 6.4f * u); lineTo(11.8f * u, 6.9f * u) }
+            }
+            Glyph.Film -> {
+                path { moveTo(3.5f * u, 6f * u); lineTo(20.5f * u, 6f * u); lineTo(20.5f * u, 18f * u); lineTo(3.5f * u, 18f * u); close() }
+                for (x in listOf(6.5f, 10.2f, 13.8f, 17.5f)) { line(x, 8.3f, x, 8.9f); line(x, 15.1f, x, 15.7f) }
             }
         }
     }

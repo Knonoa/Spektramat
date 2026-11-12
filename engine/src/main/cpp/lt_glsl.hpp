@@ -52,6 +52,8 @@ inline float exp2(float v) { return std::exp2(v); }
 inline float log2(float v) { return std::log2(v); }
 inline float log(float v) { return std::log(v); }
 inline float cos(float v) { return std::cos(v); }
+inline float sin(float v) { return std::sin(v); }
+inline float atan(float y, float x) { return std::atan2(y, x); }
 inline float floor(float v) { return std::floor(v); }
 inline float abs(float v) { return std::fabs(v); }
 

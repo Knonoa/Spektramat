@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <files-path name="prints" path="prints/" />
+    <!-- where the system camera is asked to write, and where exports wait to be shared -->
+    <cache-path name="handover" path="handover/" />
 </paths>

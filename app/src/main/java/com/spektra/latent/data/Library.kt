@@ -7,12 +7,15 @@ import android.database.sqlite.SQLiteOpenHelper
 import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.util.Log
+import com.spektra.latent.Journal
 import androidx.exifinterface.media.ExifInterface
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.engine.FilmTables
 import com.spektra.latent.engine.LinearImage
+import com.spektra.latent.engine.PrintOrder
+import com.spektra.latent.engine.Rebate
 import com.spektra.latent.model.Look
+import com.spektra.latent.model.Shooting
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -127,7 +130,7 @@ class Library(context: Context) {
                     added += insertFrame(rollId, copy, name, size, metered, look)
                     publish()
                 } catch (e: Exception) {
-                    Log.w(TAG, "import failed: $name", e)
+                    Journal.w(TAG, "import failed: $name", e)
                     copy?.delete()
                     failed += "$name：${e.message ?: "无法读取"}"
                 }
@@ -146,7 +149,9 @@ class Library(context: Context) {
      * brightness the camera and the person have already decided; null to
      * measure it, as for any RAW.
      */
-    suspend fun addCapture(shot: File, name: String, look: Look, metered: Float?): Frame? = withContext(Dispatchers.IO) {
+    suspend fun addCapture(
+        shot: File, name: String, look: Look, metered: Float?, roll: Long? = null, keepOnFailure: Boolean = false,
+    ): Frame? = withContext(Dispatchers.IO) {
         val copy = File(originals, UUID.randomUUID().toString() + extension(name))
         try {
             if (!shot.renameTo(copy)) {
@@ -154,19 +159,31 @@ class Library(context: Context) {
                 shot.delete()
             }
             val size = Decoder.size(copy) ?: throw IOException("拍下的文件读不出来")
-            val thumb = File(thumbs, copy.nameWithoutExtension + "_1.jpg")
-            val ev = Decoder.decode(copy, THUMB_EDGE, look.lensShading).use { small ->
-                val ev = metered ?: small.meterEv()
-                renderThumb(small, look, ev, size.max(), thumb)
-                ev
-            }
-            val id = insertFrame(cameraRoll(), copy, name, size, ev, look)
+            // metered on the whole picture, whatever shape it will be cut to
+            val ev = metered ?: Decoder.decode(copy, THUMB_EDGE, look.lensShading).use { it.meterEv() }
+            val id = insertFrame(roll ?: cameraRoll(), copy, name, size, ev, look)
             publish()
-            frame(id)
+            val filed = frame(id) ?: throw IOException("拍下的照片没有登记上")
+            // the thumbnail needs the frame itself: its number and date go onto the film's edge.
+            // The photograph is filed by now; a thumbnail that fails does not unfile it.
+            try {
+                Decoder.decode(copy, THUMB_EDGE, look.lensShading, look.aspect).use {
+                    renderThumb(it, look, ev, look.frameSize(size[0], size[1]).max(), filed.thumb, rebateOf(filed, look))
+                }
+            } catch (e: Exception) {
+                Journal.w(TAG, "no thumbnail for $name", e)
+            }
+            return@withContext filed
         } catch (e: Exception) {
-            Log.w(TAG, "capture not filed: $name", e)
-            copy.delete()
-            shot.delete()
+            Journal.w(TAG, "capture not filed: $name", e)
+            if (keepOnFailure) {
+                // the caller has no other copy: the file goes back where it came from
+                if (copy.exists() && !shot.exists() && !copy.renameTo(shot)) copy.copyTo(shot, overwrite = true)
+                copy.delete()
+            } else {
+                copy.delete()
+                shot.delete()
+            }
             null
         }
     }
@@ -178,10 +195,14 @@ class Library(context: Context) {
         val revision = f.revision + 1
         val thumb = File(thumbs, f.file.nameWithoutExtension + "_$revision.jpg")
         try {
-            Decoder.decode(f.file, THUMB_EDGE, look.lensShading).use { renderThumb(it, look, f.meteredEv, f.longEdge, thumb) }
+            Decoder.decode(f.file, THUMB_EDGE, look.lensShading, look.aspect).use {
+                renderThumb(it, look, f.meteredEv, look.frameSize(f.width, f.height).max(), thumb, rebateOf(f, look))
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "thumbnail failed for ${f.name}", e)
+            Journal.w(TAG, "thumbnail failed for ${f.name}", e)
         }
+        // larger copies of the previous revision are of no use any more
+        thumbs.listFiles { file -> file.name.startsWith(f.file.nameWithoutExtension + "_${f.revision}_p") }?.forEach { it.delete() }
         db.update("frame", ContentValues().apply {
             put("look", look.toJson().toString())
             put("revision", revision)
@@ -197,6 +218,7 @@ class Library(context: Context) {
             db.delete("frame", "id=?", arrayOf(id.toString()))
             f.file.delete()
             f.thumb.delete()
+            thumbs.listFiles { file -> file.name.startsWith(f.file.nameWithoutExtension + "_") }?.forEach { it.delete() }
         }
         db.execSQL("DELETE FROM roll WHERE id NOT IN (SELECT DISTINCT roll_id FROM frame)")
         publish()
@@ -229,25 +251,73 @@ class Library(context: Context) {
 
     // ---- thumbnails
 
-    private fun renderThumb(small: LinearImage, look: Look, meteredEv: Float, printLongEdge: Int, out: File) {
-        val bitmap: Bitmap = synchronized(thumbLock) {
-            thumbTables.bake(
-                look.film, look.paper, look.scanFilm,
-                interLayer = look.interLayer > 0f, interLayerAmount = look.interLayer / 100f,
-                yShift = look.filterY, mShift = look.filterM,
-            )
-            val amount = look.grain / 100f
-            val shownUm = 35000f / max(small.width, small.height)
-            val printUm = 35000f / max(printLongEdge, 1)
-            val film = thumbTables.filmBlock(1f, look.printGain, amount, FilmEngine.grainScale(amount, shownUm, printUm), 1f)
-            FilmEngine.renderFast(small, thumbTables, look.grade(meteredEv), film)
-        }
+    private fun renderThumb(small: LinearImage, look: Look, meteredEv: Float, printLongEdge: Int, out: File, rebate: Rebate = Rebate()) {
+        val bitmap = picture(small, look, meteredEv, printLongEdge, rebate)
         try {
             val tmp = File(out.parentFile, out.name + ".tmp")
             tmp.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
             if (!tmp.renameTo(out)) throw IOException("thumbnail could not be saved")
         } finally {
             bitmap.recycle()
+        }
+    }
+
+    /**
+     * [small] as [look] prints it, at [small]'s own size. With the film's edge
+     * or a date on the negative the picture comes from the engine itself (the
+     * edge is its work), otherwise from the tables. [small] is used up: do not
+     * read it afterwards.
+     */
+    private fun picture(small: LinearImage, look: Look, meteredEv: Float, printLongEdge: Int, rebate: Rebate): Bitmap {
+        if (!rebate.idle) {
+            return FilmEngine.develop(
+                small, look.grade(meteredEv),
+                look.order(seed = 1L).let { o ->
+                    PrintOrder(
+                        o.film, o.paper, o.scanFilm, o.printExposure, o.yShift, o.mShift, o.interLayer, o.interLayerAmount,
+                        o.halation, o.halationAmount, o.scatter, o.grain, o.grainAmount, o.glare, o.glareAmount, o.sharpen,
+                        o.filmFormatMm, o.seed, rebate,
+                    )
+                },
+                look.finish(), look.finishTable(), lane = FilmEngine.THUMB,
+            )
+        }
+        return synchronized(thumbLock) {
+            thumbTables.bake(
+                look.film, look.paper, look.scanFilm,
+                interLayer = look.interLayer > 0f, interLayerAmount = look.interLayer / 100f,
+                yShift = look.filterY, mShift = look.filterM,
+            )
+            val amount = look.grain / 100f
+            val shownUm = look.formatUm / max(small.width, small.height)
+            val printUm = look.formatUm / max(printLongEdge, 1)
+            val film = thumbTables.filmBlock(1f, look.printGain, amount, FilmEngine.grainScale(amount, shownUm, printUm), 1f)
+            FilmEngine.renderFast(small, thumbTables, look.grade(meteredEv), film, look.finish(), look.finishTable())
+        }
+    }
+
+    /** What [frame] puts on its negative besides the picture, with [look]. */
+    fun rebateOf(frame: Frame, look: Look): Rebate =
+        if (!look.edge.on && !look.date.on) Rebate() else look.rebate(Shooting.of(frame), frameSeed(frame), frame.number)
+
+    /**
+     * A larger copy of the frame as it prints, for places that show it bigger
+     * than a thumbnail (the light table). Made once per revision and kept on
+     * disk; null when the original cannot be read.
+     */
+    suspend fun proxy(frame: Frame, longEdge: Int = PROXY_EDGE): File? = withContext(Dispatchers.IO) {
+        val file = File(thumbs, frame.file.nameWithoutExtension + "_${frame.revision}_p$longEdge.jpg")
+        if (file.exists()) return@withContext file
+        try {
+            Decoder.decode(frame.file, longEdge, frame.look.lensShading, frame.look.aspect).use {
+                renderThumb(it, frame.look, frame.meteredEv, frame.look.frameSize(frame.width, frame.height).max(), file, rebateOf(frame, frame.look))
+            }
+            file
+        } catch (e: Exception) {
+            Journal.w(TAG, "no proxy for ${frame.name}", e)
+            null
+        } catch (e: OutOfMemoryError) {
+            null
         }
     }
 
@@ -259,10 +329,13 @@ class Library(context: Context) {
         return db.insertOrThrow("roll", null, ContentValues().apply { put("name", name); put("created", now) })
     }
 
+    /** The roll a tethered camera's pictures go onto today. */
+    suspend fun tetherRoll(): Long = withContext(Dispatchers.IO) { cameraRoll("联机") }
+
     /** One roll per day for what the camera shoots; a roll that was renamed is left alone and a new one begun. */
-    private fun cameraRoll(): Long {
+    private fun cameraRoll(kind: String = "相机"): Long {
         val now = System.currentTimeMillis()
-        val name = "相机 " + SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(now))
+        val name = "$kind " + SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(now))
         db.rawQuery("SELECT id FROM roll WHERE name=? ORDER BY id DESC LIMIT 1", arrayOf(name)).use {
             if (it.moveToFirst()) return it.getLong(0)
         }
@@ -376,5 +449,10 @@ class Library(context: Context) {
         private const val TAG = "latent-library"
         /** Long edge of thumbnails and of the picture metering is taken from. */
         const val THUMB_EDGE = 640
+        /** Long edge of the larger copies the light table shows. */
+        const val PROXY_EDGE = 1600
+
+        /** The advance and scan of one frame: the same every time it is printed. */
+        fun frameSeed(frame: Frame): Int = (frame.id % 9973L).toInt() + 1
     }
 }

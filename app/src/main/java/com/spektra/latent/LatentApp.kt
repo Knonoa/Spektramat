@@ -2,7 +2,10 @@ package com.spektra.latent
 
 import android.app.Application
 import com.spektra.latent.data.Library
+import com.spektra.latent.data.LightTableStore
+import com.spektra.latent.tether.Monitor
 import com.spektra.latent.data.PrintDesk
+import com.spektra.latent.data.Recipes
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.gl.GlCore
 import kotlinx.coroutines.CoroutineScope
@@ -16,7 +19,9 @@ import kotlinx.coroutines.launch
 sealed interface Startup {
     data object Loading : Startup
     data class Failed(val reason: String) : Startup
-    data class Ready(val library: Library, val prints: PrintDesk) : Startup
+    data class Ready(
+        val library: Library, val prints: PrintDesk, val recipes: Recipes, val monitor: Monitor, val table: LightTableStore,
+    ) : Startup
 }
 
 class LatentApp : Application() {
@@ -28,6 +33,7 @@ class LatentApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        if (BuildConfig.DEBUG) Journal.open(this)   // before anything else can speak
         GlCore   // start the GL thread now; its context is ready before the first picture
         scope.launch(Dispatchers.IO) {
             val failure = try {
@@ -39,10 +45,16 @@ class LatentApp : Application() {
                 _startup.value = Startup.Failed(failure)
                 return@launch
             }
+            Journal.i("latent", "engine ready: ${FilmEngine.catalog.films.size} films, ${FilmEngine.catalog.papers.size} papers")
             // the catalogue is read after the engine: a saved look names film stocks
             val library = Library(this@LatentApp)
             library.load()
-            _startup.value = Startup.Ready(library, PrintDesk(this@LatentApp, scope, library))
+            val recipes = Recipes(this@LatentApp)
+            recipes.load()
+            _startup.value = Startup.Ready(
+                library, PrintDesk(this@LatentApp, scope, library), recipes,
+                Monitor(this@LatentApp, library, scope), LightTableStore(this@LatentApp),
+            )
             if (BuildConfig.DEBUG) importInbox(library)
         }
     }

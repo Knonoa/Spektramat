@@ -8,7 +8,10 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
+import android.graphics.BitmapFactory
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.layout.height
+import com.spektra.latent.data.Printer
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
@@ -339,6 +342,18 @@ private fun Details(job: PrintJob, desk: PrintDesk, close: () -> Unit) {
             Pill("知道了", { close(); desk.dismiss(job) }, Modifier.fillMaxWidth())
         }
         else -> {
+            // the photograph coming out of the character matrix, as far as the engine has really got
+            val small = remember(job.frame.thumb.path) { BitmapFactory.decodeFile(job.frame.thumb.path) }
+            if (small != null) {
+                val come by animateFloatAsState(
+                    if (state is PrintJob.State.Waiting) 0.04f else (job.stage + 1f) / (Printer.STAGES + 1f), tween(900), label = "come",
+                )
+                GlyphField(
+                    GlyphSubject.Picture(small, come), Modifier.fillMaxWidth().height(168.dp),
+                    cell = 8.dp, strength = 0.9f,
+                )
+                Gap(height = 12.dp)
+            }
             Txt("正在冲印", Type.heading)
             Gap(height = 6.dp)
             Txt("${job.frame.name}   $film   长边 ${job.longEdge}", Type.label, color = Ink.Dim, maxLines = 2)

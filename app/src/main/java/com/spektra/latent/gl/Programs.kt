@@ -2,7 +2,7 @@ package com.spektra.latent.gl
 
 import android.content.Context
 import android.opengl.GLES30
-import android.util.Log
+import com.spektra.latent.Journal
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -67,7 +67,7 @@ class Program(vertex: String, fragment: String) {
         if (status[0] == 0) {
             val log = GLES30.glGetShaderInfoLog(shader)
             GLES30.glDeleteShader(shader)
-            Log.e("latent-gl", "shader failed:\n$log")
+            Journal.e("latent-gl", "shader failed:\n$log")
             throw IllegalStateException("shader compile failed: $log")
         }
         return shader
@@ -86,6 +86,10 @@ object ShaderText {
         "dmax" to 3, "positive" to 1, "le_min" to 1, "le_scale" to 1, "d_lo" to 3, "d_scale" to 3,
         "print_gain" to 1, "ple_min" to 1, "ple_scale" to 1, "s_lo" to 3, "s_scale" to 3,
         "scan_film" to 1, "grain" to 1, "grain_amount" to 1, "seed" to 1,
+    )
+    val FINISH = listOf(
+        "curve" to 1, "mixer" to 1, "grading" to 1, "tint_s" to 3, "tint_m" to 3, "tint_h" to 3, "lift" to 3,
+        "balance" to 1, "blending" to 1, "vignette" to 1, "vignette_mid" to 1,
     )
 
     /** A quad placed by `u_rect` (x, y, w, h in clip space) showing the texture region `u_uv`. */
@@ -163,6 +167,30 @@ vec3 tex_enlarger(vec3 c) {
 vec3 tex_scan(vec3 c) {
     return lut3(u_scan, u_scan_n, c);
 }
+
+// The finishing table: 256 samples wide (Finishing.SAMPLES), row 0 the tone
+// curve, row 1 the colour mixer over hue. Read as lt_fast.cpp reads it.
+uniform sampler2D u_finish_table;
+
+vec3 tex_curve(vec3 u) {
+    vec3 x = clamp(u, 0.0, 1.0) * 255.0;
+    vec3 i0 = min(floor(x), vec3(254.0));
+    vec3 f = x - i0;
+    ivec3 i = ivec3(i0);
+    float r = mix(texelFetch(u_finish_table, ivec2(i.x, 0), 0).r, texelFetch(u_finish_table, ivec2(i.x + 1, 0), 0).r, f.x);
+    float g = mix(texelFetch(u_finish_table, ivec2(i.y, 0), 0).g, texelFetch(u_finish_table, ivec2(i.y + 1, 0), 0).g, f.y);
+    float b = mix(texelFetch(u_finish_table, ivec2(i.z, 0), 0).b, texelFetch(u_finish_table, ivec2(i.z + 1, 0), 0).b, f.z);
+    return vec3(r, g, b);
+}
+
+vec3 tex_mixer(float hue) {
+    float x = (hue - floor(hue)) * 256.0;
+    float i0 = min(floor(x), 255.0);
+    float f = x - i0;
+    int i = int(i0);
+    int j = (i + 1) & 255;
+    return mix(texelFetch(u_finish_table, ivec2(i, 1), 0).rgb, texelFetch(u_finish_table, ivec2(j, 1), 0).rgb, f);
+}
 """
 
     /**
@@ -174,6 +202,7 @@ vec3 tex_scan(vec3 c) {
     private const val PREVIEW_MAIN = """
 uniform Grade u_grade;
 uniform Film u_film;
+uniform Finish u_finish;
 uniform sampler2D u_src;
 uniform sampler2D u_halo;
 uniform vec3 u_halation;
@@ -190,7 +219,7 @@ void main() {
             raw = (raw + u_halation * texture(u_halo, v_uv).rgb) / (vec3(1.0) + u_halation);
         }
         vec3 d = film_grain(film_develop(raw, u_film), floor(v_uv * u_cells), u_film);
-        c = film_print(d, u_film);
+        c = finish_all(film_print(d, u_film), v_uv * 2.0 - 1.0, u_finish);
     }
     o_color = vec4(lt_srgb3(c), 1.0);
 }
@@ -257,6 +286,7 @@ void main() {
     private const val CAMERA_MAIN = """
 uniform Grade u_grade;
 uniform Film u_film;
+uniform Finish u_finish;
 uniform samplerExternalOES u_camera;
 uniform vec2 u_cells;
 in vec2 v_uv;
@@ -267,7 +297,7 @@ void main() {
     vec3 lin = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
     vec3 raw = film_expose(grade_scene(lin, u_grade), u_film);
     vec3 d = film_grain(film_develop(raw, u_film), floor(v_uv * u_cells), u_film);
-    o_color = vec4(lt_srgb3(film_print(d, u_film)), 1.0);
+    o_color = vec4(lt_srgb3(finish_all(film_print(d, u_film), v_uv * 2.0 - 1.0, u_finish)), 1.0);
 }
 """
 

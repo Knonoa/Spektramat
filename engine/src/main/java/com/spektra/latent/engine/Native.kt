@@ -18,6 +18,7 @@ internal object Native {
     external fun decodeFile(path: String, maxEdge: Int, lensShading: Boolean): Long
     external fun fromBitmap(bitmap: Bitmap): Long
     external fun scaled(image: Long, maxEdge: Int): Long
+    external fun cropped(image: Long, x: Int, y: Int, w: Int, h: Int): Long
     external fun imageInfo(image: Long): IntArray
     external fun imagePixels(image: Long): ByteBuffer?
     external fun display(image: Long, out: Bitmap): String?
@@ -39,11 +40,18 @@ internal object Native {
         tables: Long, filmGain: Float, printGain: Float, grainAmount: Float, grain: Float, seed: Float,
     ): FloatArray
 
-    external fun renderFast(image: Long, tables: Long, grade: FloatArray, film: FloatArray, out: Bitmap): String?
+    external fun renderFast(
+        image: Long, tables: Long, grade: FloatArray, film: FloatArray, finish: FloatArray, finishTable: FloatArray,
+        out: Bitmap,
+    ): String?
     external fun cancelDevelop()
+    external fun cancelProof()
+    external fun developSize(w: Int, h: Int, rebate: Array<String>?, rebateNumbers: FloatArray?): IntArray?
     external fun develop(
         image: Long, grade: FloatArray, film: String, paper: String, scanFilm: Boolean,
-        look: FloatArray, seed: Long, out: Bitmap, listener: StageListener?,
+        look: FloatArray, finish: FloatArray, finishTable: FloatArray,
+        rebate: Array<String>?, rebateNumbers: FloatArray?, lane: Int,
+        seed: Long, out: Bitmap, listener: StageListener?,
     ): String?
 }
 

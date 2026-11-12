@@ -25,6 +25,14 @@ constexpr int kGradeFloats = 11;
 //              le_min, le_scale, d_lo[3], d_scale[3], print_gain, ple_min, ple_scale, s_lo[3],
 //              s_scale[3], scan_film, grain, grain_amount, seed
 constexpr int kFilmFloats = 44;
+// struct Finish: curve, mixer, grading, tint_s[3], tint_m[3], tint_h[3], lift[3], balance, blending,
+//                vignette, vignette_mid
+constexpr int kFinishFloats = 19;
+// The finishing table: two rows of this many RGB samples. Row 0 is the tone curve (sRGB-encoded
+// output of each channel for an sRGB-encoded input of i / (n - 1)); row 1 is the colour mixer over
+// hue (hue shift in turns, saturation change, lightness change at hue i / n, periodic).
+constexpr int kFinishSamples = 256;
+constexpr int kFinishTableFloats = kFinishSamples * 2 * 3;
 
 // A grade that changes nothing.
 void neutral_grade(float grade[kGradeFloats]);
@@ -49,10 +57,21 @@ void film_block(const FilmTables& tables, float film_gain, float print_gain, flo
 // and `out` may be the same buffer. A neutral grade copies.
 void grade_image(const float grade[kGradeFloats], const float* in, float* out, int w, int h);
 
+// Whether a Finish block changes anything.
+bool finish_is_neutral(const float finish[kFinishFloats]);
+
 // The table-driven film: scene-linear sRGB in. Writes whichever outputs are
 // not null: `rgba` (sRGB, 8-bit, w * h * 4) and `linear` (display-linear sRGB,
 // w * h * 3). No halation: that needs neighbours, the caller adds it or not.
+// `finish` (kFinishFloats) and `finish_table` (kFinishTableFloats) finish the
+// picture afterwards; null for none.
 void render_fast(const FilmTables& tables, const float grade[kGradeFloats], const float film[kFilmFloats],
-                 const float* rgb, int w, int h, uint8_t* rgba, float* linear);
+                 const float* rgb, int w, int h, uint8_t* rgba, float* linear,
+                 const float* finish = nullptr, const float* finish_table = nullptr);
+
+// Finishes a picture the engine has made: display-linear planes in, sRGB 8-bit
+// RGBA out (w * h * 4). The same code as the preview's last step.
+void finish_planes(const float finish[kFinishFloats], const float* finish_table, const float* r, const float* g,
+                   const float* b, int w, int h, uint8_t* rgba);
 
 }  // namespace lt

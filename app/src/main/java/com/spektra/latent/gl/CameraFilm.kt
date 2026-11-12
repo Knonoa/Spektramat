@@ -8,7 +8,7 @@ import android.opengl.GLES30
 import android.opengl.Matrix
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
+import com.spektra.latent.Journal
 import android.util.Size
 import android.view.Surface
 import androidx.camera.core.CameraEffect
@@ -16,6 +16,7 @@ import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceOutput
 import androidx.camera.core.SurfaceProcessor
 import androidx.camera.core.SurfaceRequest
+import com.spektra.latent.BuildConfig
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.engine.FilmTables
 import com.spektra.latent.model.Look
@@ -45,6 +46,7 @@ class CameraFilm(context: Context) : SurfaceProcessor {
     private val app = context.applicationContext
     private val tables = FilmTables()
     private val gpu = FilmGpu()
+    private val finish = FinishGpu()
     private var program: Program? = null
     private val inputs = HashMap<SurfaceTexture, Int>()               // each camera stream and its texture
     private val outputs = LinkedHashMap<SurfaceOutput, EGLSurface>()
@@ -95,7 +97,7 @@ class CameraFilm(context: Context) : SurfaceProcessor {
         }
         val egl = GlCore.windowSurface(surface)
         if (egl == null) {
-            Log.e(TAG, "no EGL surface for output ${output.size} targets ${output.targets}")
+            Journal.e(TAG, "no EGL surface for output ${output.size} targets ${output.targets}")
             output.close()
             return
         }
@@ -143,6 +145,7 @@ class CameraFilm(context: Context) : SurfaceProcessor {
         window = null
         GlCore.makeCurrent(null)
         gpu.release()
+        finish.release()
         tables.close()
     }
 
@@ -177,7 +180,7 @@ class CameraFilm(context: Context) : SurfaceProcessor {
                     try {
                         draw(s)
                     } catch (t: Throwable) {
-                        Log.e(TAG, "camera frame failed", t)
+                        Journal.e(TAG, "camera frame failed", t)
                         onFailure?.invoke(t.message ?: "取景画面画不出来")
                     }
                 }
@@ -207,6 +210,7 @@ class CameraFilm(context: Context) : SurfaceProcessor {
         if (!gpu.ready) return
         val p = program ?: Program(ShaderText.CAMERA_VERTEX, ShaderText.cameraFragment(app)).also { program = it }
         frames++
+        val began = System.nanoTime()
 
         if (toWindow) {
             val target = window ?: return
@@ -256,6 +260,33 @@ class CameraFilm(context: Context) : SurfaceProcessor {
             }
         }
         GlCore.makeCurrent(null)
+        pace(began, if (toWindow) 1 else outputs.size)
+    }
+
+    // how fast the film is being drawn, into the log every couple of seconds (development builds only)
+    private var paceSince = 0L
+    private var paceFrames = 0
+    private var paceNanos = 0L
+
+    private fun pace(began: Long, places: Int) {
+        if (!BuildConfig.DEBUG) return
+        val now = System.nanoTime()
+        if (paceSince == 0L) paceSince = began
+        paceFrames++
+        paceNanos += now - began
+        val span = now - paceSince
+        if (span >= 2_000_000_000L) {
+            Journal.i(
+                TAG,
+                String.format(
+                    java.util.Locale.US, "film drawn %.1f times a second, %.1f ms each, to %d place(s)",
+                    paceFrames * 1e9 / span, paceNanos / 1e6 / paceFrames, places,
+                ),
+            )
+            paceSince = now
+            paceFrames = 0
+            paceNanos = 0L
+        }
     }
 
     /** Draws the camera's texture through the film over the whole viewport, [w] x [h], with [outputMatrix]. */
@@ -267,9 +298,10 @@ class CameraFilm(context: Context) : SurfaceProcessor {
         gpu.bind(p)
         // the camera has already chosen the exposure: its picture is taken as it is, like a frame it shot
         p.setStruct("u_grade", ShaderText.GRADE, look.grade(0f))
+        finish.bind(p, look)
         val amount = look.grain / 100f
-        val shownUm = FilmPreview.FILM_LONG_EDGE_UM / max(w, h)
-        val keptUm = FilmPreview.FILM_LONG_EDGE_UM / keptLongEdge
+        val shownUm = look.formatUm / max(w, h)
+        val keptUm = look.formatUm / keptLongEdge
         // the grain moves from frame to frame, as it does on film running through a gate
         val film = tables.filmBlock(1f, look.printGain, amount, FilmEngine.grainScale(amount, shownUm, keptUm), 1f + frames % 997)
         p.setStruct("u_film", ShaderText.FILM, film)
@@ -286,4 +318,4 @@ class CameraFilm(context: Context) : SurfaceProcessor {
 
 /** [film] as a CameraX effect on the streams named by [targets] (PREVIEW, or PREVIEW | VIDEO_CAPTURE). */
 class FilmEffect(targets: Int, film: CameraFilm) :
-    CameraEffect(targets, GlCore.executor, film, { Log.e("latent-camera", "the film effect failed", it) })
+    CameraEffect(targets, GlCore.executor, film, { Journal.e("latent-camera", "the film effect failed", it) })

@@ -1,7 +1,7 @@
 // fast_vs_engine.cpp -- how close is the table-driven film (shaders/latent.glsl,
 // what the GPU preview runs) to the engine that makes the finished print?
 //
-//   fast_vs_engine <engine.bin>
+//   fast_vs_engine <engine.bin> [fonts directory] [directory for proofs]
 //
 // Part 1, colour: a frame sweeping -12..+6 EV against hue and saturation, plus
 // a grey ramp, through both paths with every neighbourhood effect switched off
@@ -15,6 +15,9 @@
 // and the standard deviation of the display-linear result per channel. Fails
 // when the mean differs by more than half a code value or the spread by more
 // than 10 %.
+//
+// Part 4, finishing: tone curve, colour mixer, colour grading and vignette on the CPU --
+// neutral settings leave the picture alone, and the print and the thumbnail run one code.
 //
 // Part 3, neutral filters: film/paper pairs the profile database has no filter
 // pack for print mid grey neutral, through the engine, with the fitted shift.
@@ -43,6 +46,39 @@ void hsv(float h, float s, float v, float out[3]) {
         const float t = std::fmod(k[c] + h * 6.0f, 6.0f);
         out[c] = v - v * s * std::max(0.0f, std::min({t, 4.0f - t, 1.0f}));
     }
+}
+
+// Something like a photograph, for the proofs: a sky with the sun in it, hills, bands of colour below.
+std::vector<float> scene(int w, int h) {
+    std::vector<float> rgb((size_t)w * h * 3);
+    const float horizon = 0.62f;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            float* p = &rgb[((size_t)y * w + x) * 3];
+            const float u = (x + 0.5f) / (float)w, v = (y + 0.5f) / (float)h;
+            if (v < horizon) {
+                const float t = v / horizon;
+                p[0] = 0.10f + 0.55f * t * t;
+                p[1] = 0.22f + 0.50f * t;
+                p[2] = 0.60f + 0.25f * t;
+                const float dx = (u - 0.72f) * (float)w / (float)h, dy = v - 0.30f;
+                const float d = std::sqrt(dx * dx + dy * dy);
+                const float sun = d < 0.05f ? 6.0f : 1.2f * std::exp(-d * 9.0f);
+                p[0] += sun;
+                p[1] += sun * 0.9f;
+                p[2] += sun * 0.7f;
+            } else {
+                const float t = (v - horizon) / (1.0f - horizon);
+                hsv((float)(int)(u * 8.0f) / 8.0f, 0.55f, 0.50f - 0.35f * t, p);
+            }
+            const float hill = horizon - 0.04f - 0.10f * std::sin(u * 7.0f) * std::sin(u * 3.1f + 1.0f);
+            if (v > hill && v < horizon + 0.02f) {
+                p[0] = 0.03f;
+                p[1] = 0.05f;
+                p[2] = 0.04f;
+            }
+        }
+    return rgb;
 }
 
 std::vector<float> sweep(int w, int h) {
@@ -279,6 +315,223 @@ int main(int argc, char** argv) {
                         y, m, cast[0][0], cast[0][1], cast[1][0], cast[1][1]);
             check(std::fabs(cast[1][0] - 1.0) < 0.02 && std::fabs(cast[1][1] - 1.0) < 0.02,
                   std::string(pr[0]) + " on " + pr[1] + ": mid grey prints neutral through the engine");
+        }
+    }
+
+    // ---- finishing: the last section of latent.glsl on the CPU
+    {
+        spk::RenderParams p;
+        p.film_stock = "kodak_portra_400";
+        p.print_stock = "kodak_portra_endura";
+        std::string error;
+        if (!lt::bake_tables(p, tables, error)) {
+            std::printf("FAIL finishing: tables: %s\n", error.c_str());
+            ++failures;
+        } else {
+            float grade[lt::kGradeFloats], film[lt::kFilmFloats];
+            lt::neutral_grade(grade);
+            lt::film_block(tables, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, film);
+            const size_t np = (size_t)W * H;
+            std::vector<float> plain(np * 3), lin(np * 3);
+            std::vector<uint8_t> plain8(np * 4), out8(np * 4), planes8(np * 4);
+            lt::render_fast(tables, grade, film, frame.data(), W, H, plain8.data(), plain.data());
+
+            // a table that changes nothing: the straight line, and a mixer of zeros
+            std::vector<float> table(lt::kFinishTableFloats, 0.0f);
+            for (int i = 0; i < lt::kFinishSamples; i++)
+                for (int c = 0; c < 3; c++) table[(size_t)i * 3 + c] = (float)i / (float)(lt::kFinishSamples - 1);
+
+            // (a) a neutral block is not run at all
+            float finish[lt::kFinishFloats] = {};
+            finish[16] = 0.5f;
+            finish[18] = 0.25f;
+            check(lt::finish_is_neutral(finish), "finishing: a block with nothing set is neutral");
+            lt::render_fast(tables, grade, film, frame.data(), W, H, out8.data(), lin.data(), finish, table.data());
+            check(out8 == plain8 && lin == plain, "finishing: neutral finishing leaves the picture bit for bit");
+
+            // (b) every step switched on with nothing to do: the round trips (sRGB, Oklab) give the picture back
+            finish[0] = finish[1] = finish[2] = 1.0f;
+            lt::render_fast(tables, grade, film, frame.data(), W, H, out8.data(), lin.data(), finish, table.data());
+            int worst = 0;
+            for (size_t i = 0; i < np * 4; i++) worst = std::max(worst, std::abs((int)out8[i] - (int)plain8[i]));
+            std::printf("FINISH round trips: worst difference %d code values\n", worst);
+            check(worst <= 1, "finishing: empty curve, mixer and grading change no pixel by more than 1 code value");
+
+            // (c) a real finish: an S curve, greens turned and deepened, cool shadows, warm highlights, dark corners
+            for (int i = 0; i < lt::kFinishSamples; i++) {
+                const float x = (float)i / (float)(lt::kFinishSamples - 1);
+                const float s = x * x * (3.0f - 2.0f * x);
+                for (int c = 0; c < 3; c++) table[(size_t)i * 3 + c] = 0.5f * x + 0.5f * s;
+            }
+            for (int i = 0; i < lt::kFinishSamples; i++) {
+                const float hue = (float)i / (float)lt::kFinishSamples;
+                const float near_green = std::max(0.0f, 1.0f - std::fabs(hue - 0.39f) / 0.08f);
+                table[(size_t)(lt::kFinishSamples + i) * 3] = 0.05f * near_green;
+                table[(size_t)(lt::kFinishSamples + i) * 3 + 1] = 0.4f * near_green;
+                table[(size_t)(lt::kFinishSamples + i) * 3 + 2] = -0.3f * near_green;
+            }
+            const float real[lt::kFinishFloats] = {1, 1, 1, -0.02f, -0.01f, 0.06f, 0, 0, 0, 0.05f, 0.01f, -0.05f,
+                                                   0.02f, 0.0f, -0.02f, 0.1f, 0.5f, -1.0f, 0.25f};
+            lt::render_fast(tables, grade, film, frame.data(), W, H, out8.data(), lin.data(), real, table.data());
+            int moved = 0;
+            for (size_t i = 0; i < np * 4; i++) moved = std::max(moved, std::abs((int)out8[i] - (int)plain8[i]));
+            check(moved > 8, "finishing: a real finish changes the picture");
+            bool sane = true;
+            for (float v : lin) sane = sane && std::isfinite(v) && v >= 0.0f;
+            check(sane, "finishing: every finished value is finite and not negative");
+
+            // the print's path (engine planes -> finish_planes) and the thumbnail's (render_fast) are one code
+            std::vector<float> pr(np), pg(np), pb(np);
+            for (size_t i = 0; i < np; i++) {
+                pr[i] = plain[i * 3];
+                pg[i] = plain[i * 3 + 1];
+                pb[i] = plain[i * 3 + 2];
+            }
+            lt::finish_planes(real, table.data(), pr.data(), pg.data(), pb.data(), W, H, planes8.data());
+            check(planes8 == out8, "finishing: the print's path and the thumbnail's give the same bytes");
+
+            // (d) a curve alone leaves grey grey
+            float curve_only[lt::kFinishFloats] = {};
+            curve_only[0] = 1.0f;
+            std::vector<float> ramp(np);
+            for (size_t i = 0; i < np; i++) ramp[i] = (float)i / (float)(np - 1);
+            lt::finish_planes(curve_only, table.data(), ramp.data(), ramp.data(), ramp.data(), W, H, planes8.data());
+            bool grey = true;
+            for (size_t i = 0; i < np; i++) grey = grey && planes8[i * 4] == planes8[i * 4 + 1] && planes8[i * 4 + 1] == planes8[i * 4 + 2];
+            check(grey, "finishing: the tone curve keeps a grey ramp grey");
+        }
+    }
+
+    // ---- Part 5, the film's edge: how large the piece of film is, and the open gate
+    {
+        if (argc >= 3) {
+            auto load = [&](const char* name, std::vector<uint8_t>& into) {
+                std::ifstream f(std::string(argv[2]) + "/" + name, std::ios::binary);
+                into.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            };
+            load("texgyreheros-regular.otf", ctx.fonts.regular);
+            load("texgyreheros-bold.otf", ctx.fonts.bold);
+            load("texgyreheroscn-regular.otf", ctx.fonts.condensed);
+            load("DejaVuSansMono-Bold.ttf", ctx.fonts.mono_bold);
+        }
+        const char* formats[] = {"135", "135_half", "135_xpan", "120_645", "120_6x6",
+                                 "120_6x7", "120_6x8", "120_6x9", "120_6x12", "120_6x17"};
+        bool same = true;
+        for (const char* f : formats)
+            for (int turn = 0; turn < 2; turn++) {
+                spk::RenderParams p;
+                p.overscan.active = true;
+                p.overscan.format = f;
+                p.overscan.gate = "open";
+                const int w = turn ? 200 : 317, h = turn ? 317 : 200;
+                int ow = 0, oh = 0;
+                std::string error;
+                if (!spk::render_output_size(w, h, p, ow, oh, error) || ow != w || oh != h) {
+                    std::printf("open gate, %s, %d x %d: got %d x %d %s\n", f, w, h, ow, oh, error.c_str());
+                    same = false;
+                }
+            }
+        check(same, "film edge: with the gate open the film is exactly the picture, in every format, either way up");
+        {
+            spk::RenderParams p;
+            p.overscan.active = true;
+            int ow = 0, oh = 0;
+            std::string error;
+            const bool ok = spk::render_output_size(300, 200, p, ow, oh, error);
+            check(ok && ow > 300 && oh > 200, "film edge: a 135 strip is larger than its frame both ways");
+        }
+
+        // The open gate copies the picture. Between the two rows of perforations it is the
+        // plain print of the same picture on film of the same size, and in the rows the light comes through.
+        {
+            const int EW = 360, EH = 240;
+            const std::vector<float> pic = sweep(EW, EH);
+            spk::RenderParams p;
+            p.film_stock = "kodak_portra_400";
+            p.print_stock = "kodak_portra_endura";
+            p.auto_exposure = false;
+            p.halation_active = false;
+            p.grain_active = false;
+            p.glare_active = false;
+            p.unsharp_mask = false;
+            p.dir_couplers_active = false;
+            const double px = 35.0 / EH;                    // 135 film, running along the picture
+            p.film_format_mm = (float)(px * EW);
+            std::vector<uint8_t> plain((size_t)EW * EH * 4), open((size_t)EW * EH * 4);
+            std::string error;
+            bool ok = engine.render(pic.data(), EW, EH, -1, p, plain.data(), error);
+            p.overscan.active = true;
+            p.overscan.format = "135";
+            p.overscan.gate = "open";
+            p.overscan.fog = 0.0;
+            ok = ok && engine.render(pic.data(), EW, EH, -1, p, open.data(), error);
+            if (!ok) std::printf("open gate: render failed: %s\n", error.c_str());
+            int worst = 0, holes = 0;
+            for (int y = EH / 4; y < EH * 3 / 4; y++)
+                for (int x = 0; x < EW; x++)
+                    for (int c = 0; c < 3; c++) {
+                        const size_t i = ((size_t)y * EW + x) * 4 + c;
+                        worst = std::max(worst, std::abs((int)open[i] - (int)plain[i]));
+                    }
+            // the upper row of perforations is 2.0 .. 4.8 mm from the film's edge
+            for (int y = (int)(2.5 / px); y < (int)(4.3 / px); y++)
+                for (int x = 0; x < EW; x++) {
+                    const size_t i = ((size_t)y * EW + x) * 4;
+                    const bool lit = open[i] >= 250 && open[i + 1] >= 250 && open[i + 2] >= 250;
+                    const bool was = plain[i] >= 250 && plain[i + 1] >= 250 && plain[i + 2] >= 250;
+                    if (lit && !was) holes++;
+                }
+            std::printf("OPEN GATE: worst difference between the rows %d code values, %d pixels of light in the upper row\n", worst, holes);
+            check(ok && worst <= 1, "film edge: the open gate leaves the picture between the perforations alone");
+            check(ok && holes > 50, "film edge: the open gate's perforations go through the picture");
+        }
+
+        // Pictures to look at, when a directory for them is given.
+        if (argc >= 4) {
+            struct Proof { const char* name; const char* format; const char* gate; const char* holes; bool date; int w, h; };
+            const Proof proofs[] = {
+                {"135-strip", "135", "auto", "white", false, 960, 640},
+                {"135-open", "135", "open", "white", false, 960, 640},
+                {"135-open-date-black", "135", "open", "black", true, 960, 640},
+                {"135-open-upright", "135", "open", "white", true, 640, 960},
+                {"135-open-4x3", "135", "open", "white", false, 960, 720},
+                {"half-open", "135_half", "open", "white", false, 960, 640},
+                {"120-6x6-open", "120_6x6", "open", "white", true, 960, 640},
+                {"120-645-open", "120_645", "open", "white", false, 960, 640},
+            };
+            for (const Proof& pr : proofs) {
+                const std::vector<float> pic = scene(pr.w, pr.h);
+                spk::RenderParams p;
+                p.film_stock = "kodak_portra_400";
+                p.print_stock = "kodak_portra_endura";
+                p.overscan.active = true;
+                p.overscan.format = pr.format;
+                p.overscan.gate = pr.gate;
+                p.overscan.holes = pr.holes;
+                p.overscan.edge_text = "KODAK PORTRA 400";
+                p.overscan.camera_seed = 7;
+                p.overscan.frame_seed = 3;
+                if (pr.date) {
+                    p.date.active = true;
+                    p.date.text = "'26 11 12";
+                    p.date.data_text = "1/250 F5.6";
+                }
+                int ow = 0, oh = 0;
+                std::string error;
+                if (!spk::render_output_size(pr.w, pr.h, p, ow, oh, error)) {
+                    std::printf("proof %s: %s\n", pr.name, error.c_str());
+                    continue;
+                }
+                std::vector<uint8_t> out((size_t)ow * oh * 4);
+                if (!engine.render(pic.data(), pr.w, pr.h, -1, p, out.data(), error)) {
+                    std::printf("proof %s: %s\n", pr.name, error.c_str());
+                    continue;
+                }
+                std::ofstream f(std::string(argv[3]) + "/" + pr.name + ".ppm", std::ios::binary);
+                f << "P6\n" << ow << ' ' << oh << "\n255\n";
+                for (size_t i = 0; i < (size_t)ow * oh; i++) f.write((const char*)&out[i * 4], 3);
+                std::printf("proof %s: %d x %d -> %d x %d\n", pr.name, pr.w, pr.h, ow, oh);
+            }
         }
     }
 

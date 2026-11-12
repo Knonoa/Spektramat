@@ -3,6 +3,11 @@ package com.spektra.latent.ui
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.ui.platform.LocalContext
+import com.spektra.latent.ui.monitor.MonitorScreen
+import com.spektra.latent.ui.table.TableScreen
+import kotlinx.coroutines.delay
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -37,7 +42,10 @@ import com.spektra.latent.ui.library.LibraryScreen
 sealed interface Screen {
     data object Library : Screen
     data object Camera : Screen
-    data class Darkroom(val frameId: Long, val fromCamera: Boolean = false) : Screen
+    data object Monitor : Screen
+    data object Table : Screen
+    /** [from]: where the frame was picked up, and so where leaving the darkroom goes back to. */
+    data class Darkroom(val frameId: Long, val from: Screen = Library) : Screen
 }
 
 @Composable
@@ -45,7 +53,7 @@ fun Root(app: LatentApp, incoming: List<Uri>, onIncomingTaken: () -> Unit) {
     val startup by app.startup.collectAsStateWithLifecycle()
     Box(Modifier.fillMaxSize().background(Ink.Curtain)) {
         when (val s = startup) {
-            Startup.Loading -> Unit   // the curtain; the engine is ready in well under a second
+            Startup.Loading -> Unit   // the curtain below stands until the film data is in
             is Startup.Failed -> Column(
                 Modifier.align(Alignment.Center).padding(32.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -65,7 +73,7 @@ fun Root(app: LatentApp, incoming: List<Uri>, onIncomingTaken: () -> Unit) {
                         onIncomingTaken()
                     }
                 }
-                fun leave(from: Screen): Screen = if (from is Screen.Darkroom && from.fromCamera) Screen.Camera else Screen.Library
+                fun leave(from: Screen): Screen = if (from is Screen.Darkroom) from.from else Screen.Library
                 BackHandler(enabled = screen != Screen.Library) { screen = leave(screen) }
                 AnimatedContent(
                     targetState = screen,
@@ -82,14 +90,34 @@ fun Root(app: LatentApp, incoming: List<Uri>, onIncomingTaken: () -> Unit) {
                             onImportTaken = { toImport = emptyList() },
                             onOpen = { screen = Screen.Darkroom(it) },
                             onCamera = { screen = Screen.Camera },
+                            onMonitor = { screen = Screen.Monitor },
+                            onTable = { screen = Screen.Table },
+                            prints = s.prints,
+                            recipes = s.recipes,
+                            monitor = s.monitor,
+                        )
+                        Screen.Monitor -> MonitorScreen(
+                            monitor = s.monitor,
+                            recipes = s.recipes,
+                            onBack = { screen = Screen.Library },
+                            onOpen = { screen = Screen.Darkroom(it, from = Screen.Monitor) },
+                        )
+                        Screen.Table -> TableScreen(
+                            library = s.library,
+                            store = s.table,
+                            onBack = { screen = Screen.Library },
+                            onOpen = { screen = Screen.Darkroom(it, from = Screen.Table) },
                         )
                         Screen.Camera -> CameraScreen(
                             library = s.library,
+                            prints = s.prints,
+                            recipes = s.recipes,
                             onBack = { screen = Screen.Library },
-                            onOpen = { screen = Screen.Darkroom(it, fromCamera = true) },
+                            onOpen = { screen = Screen.Darkroom(it, from = Screen.Camera) },
                         )
                         is Screen.Darkroom -> DarkroomScreen(
                             library = s.library,
+                            recipes = s.recipes,
                             frameId = current.frameId,
                             onBack = { screen = leave(current) },
                             // a print is ordered and made in the background: the darkroom stays where it is
@@ -99,6 +127,21 @@ fun Root(app: LatentApp, incoming: List<Uri>, onIncomingTaken: () -> Unit) {
                 }
                 // over every screen: the small sign that a print is under way
                 PrintOverlay(s.prints)
+            }
+        }
+        // The curtain: the name of the app standing out of the character matrix while the film data is read,
+        // and for a moment after. It is the one thing here that moves without being asked.
+        val context = LocalContext.current
+        var curtain by remember { mutableStateOf(true) }
+        LaunchedEffect(startup) {
+            if (startup !is Startup.Loading) {
+                if (startup is Startup.Ready && !animationsOff(context)) delay(520)
+                curtain = false
+            }
+        }
+        AnimatedVisibility(curtain, enter = fadeIn(tween(0)), exit = fadeOut(tween(360))) {
+            Box(Modifier.fillMaxSize().background(Ink.Curtain)) {
+                GlyphField(GlyphSubject.Word("LATENT"), Modifier.fillMaxSize(), cell = 12.dp, strength = 0.8f)
             }
         }
     }

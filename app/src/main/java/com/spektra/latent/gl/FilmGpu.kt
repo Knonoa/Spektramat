@@ -3,7 +3,11 @@ package com.spektra.latent.gl
 import android.opengl.GLES30
 import com.spektra.latent.engine.FilmTables
 import com.spektra.latent.engine.LinearImage
+import com.spektra.latent.model.Finishing
+import com.spektra.latent.model.Look
 import java.nio.Buffer
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /** Texture units used by the film shaders. */
 object Tex {
@@ -13,6 +17,7 @@ object Tex {
     const val ENLARGER = 3
     const val SCAN = 4
     const val HALO = 5
+    const val FINISH = 6
 }
 
 fun newTexture(target: Int, filter: Int): Int {
@@ -136,6 +141,42 @@ fun bindUnit(unit: Int, target: Int, texture: Int) {
     GLES30.glBindTexture(target, texture)
 }
 
+/**
+ * A look's finishing -- tone curve, colour mixer, colour grading, vignette --
+ * as the shaders take it: the table as a small float texture, the rest as the
+ * `Finish` uniform block. GL thread only.
+ */
+class FinishGpu {
+    private var texture = 0
+    private var uploaded: FloatArray? = null
+    private val staging = ByteBuffer.allocateDirect(Finishing.TABLE_FLOATS * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+
+    /** Binds the table, uploading it when it is not the one already there, and sets `u_finish` on [program] (in use). */
+    fun bind(program: Program, look: Look) {
+        val table = look.finishTable()
+        if (texture == 0) texture = newTexture(GLES30.GL_TEXTURE_2D, GLES30.GL_NEAREST)
+        bindUnit(Tex.FINISH, GLES30.GL_TEXTURE_2D, texture)
+        if (table !== uploaded) {
+            staging.clear()
+            staging.put(table)
+            staging.position(0)
+            GLES30.glPixelStorei(GLES30.GL_UNPACK_ALIGNMENT, 4)
+            GLES30.glTexImage2D(
+                GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGB32F, Finishing.SAMPLES, 2, 0, GLES30.GL_RGB, GLES30.GL_FLOAT, staging,
+            )
+            uploaded = table
+        }
+        program.setInt("u_finish_table", Tex.FINISH)
+        program.setStruct("u_finish", ShaderText.FINISH, look.finish())
+    }
+
+    fun release() {
+        deleteTexture(texture)
+        texture = 0
+        uploaded = null
+    }
+}
+
 /** A decoded picture as a half-float texture (scene-linear). GL thread only. */
 class SourceTexture {
     var id = 0; private set
@@ -167,7 +208,7 @@ fun glCheck(what: String): Boolean {
         val e = GLES30.glGetError()
         if (e == GLES30.GL_NO_ERROR) break
         clean = false
-        android.util.Log.e("latent-gl", "GL error 0x${Integer.toHexString(e)} after $what")
+        com.spektra.latent.Journal.e("latent-gl", "GL error 0x${Integer.toHexString(e)} after $what")
     }
     return clean
 }

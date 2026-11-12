@@ -17,6 +17,10 @@
 //   vec3 tex_scan(vec3 c)           print (or film) density -> display-linear sRGB, trilinear
 // Rows of the curve table: 0 film curves, 1 film curves before the inter-layer
 // effect, 2 paper curves, 3 grain variance, 4 the grain's shift of the mean density.
+// And, for finishing the print (the last section of this file):
+//   vec3 tex_curve(vec3 u)          the tone curve, per channel, sRGB-encoded in and out, u in [0,1]
+//   vec3 tex_mixer(float hue)       the colour mixer at a hue in turns [0,1), periodic:
+//                                   x hue shift (turns), y saturation change, z lightness change
 //
 // The film arithmetic follows spektra_engine.cpp stage by stage; what it leaves
 // out is everything that needs a pixel's neighbours (scatter, the spread of the
@@ -212,4 +216,132 @@ float lt_srgb(float v) {
 
 vec3 lt_srgb3(vec3 c) {
     return vec3(lt_srgb(c.x), lt_srgb(c.y), lt_srgb(c.z));
+}
+
+// eotf_sRGB
+float lt_linear(float v) {
+    float c = clamp(v, 0.0, 1.0);
+    if (c <= 0.04045) {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+vec3 lt_linear3(vec3 c) {
+    return vec3(lt_linear(c.x), lt_linear(c.y), lt_linear(c.z));
+}
+
+// ---------------------------------------------------------------- finishing
+//
+// What is done to the print itself, after the film and the paper have made it:
+// the corrections one makes to a scan. Everything here works on the finished
+// picture (display-linear sRGB in, display-linear sRGB out) and none of it
+// needs a pixel's neighbours.
+
+struct Finish {
+    float curve;        // 1: the tone curve is not the identity
+    float mixer;        // 1: the colour mixer changes something
+    float grading;      // 1: colour grading changes something
+    vec3 tint_s;        // colour grading: what shadows, midtones and highlights each add,
+    vec3 tint_m;        //   in sRGB-encoded units, with no luminance of its own
+    vec3 tint_h;
+    vec3 lift;          // lightness added to shadows (x), midtones (y), highlights (z), sRGB-encoded units
+    float balance;      // -1..1: where shadows hand over to highlights
+    float blending;     // 0..1: how gradually
+    float vignette;     // stops added at the corners (negative darkens)
+    float vignette_mid; // 0..1: how far from the centre it begins
+};
+
+// Oklab (Ottosson 2020): lightness, and two colour axes on which equal steps look equal.
+vec3 lt_oklab(vec3 c) {
+    float l = pow(max(0.4122214708 * c.x + 0.5363325363 * c.y + 0.0514459929 * c.z, 0.0), 1.0 / 3.0);
+    float m = pow(max(0.2119034982 * c.x + 0.6806995451 * c.y + 0.1073969566 * c.z, 0.0), 1.0 / 3.0);
+    float s = pow(max(0.0883024619 * c.x + 0.2817188376 * c.y + 0.6299787005 * c.z, 0.0), 1.0 / 3.0);
+    return vec3(
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s);
+}
+
+vec3 lt_oklab_inverse(vec3 lab) {
+    float l = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+    float m = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+    float s = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+    l = l * l * l;
+    m = m * m * m;
+    s = s * s * s;
+    return vec3(
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+}
+
+// The tone curve: drawn on the picture as it is seen (sRGB-encoded), each
+// channel through its own curve.
+vec3 finish_tone(vec3 rgb) {
+    return lt_linear3(tex_curve(lt_srgb3(rgb)));
+}
+
+// The colour mixer: a colour is moved according to its hue -- turned, made
+// more or less colourful, lighter or darker. A colour counts as its hue only
+// as far as it is colourful, so greys stay where they are.
+vec3 finish_mixer(vec3 rgb) {
+    vec3 lab = lt_oklab(rgb);
+    float chroma = sqrt(lab.y * lab.y + lab.z * lab.z);
+    if (chroma < 1.0e-5) {
+        return rgb;
+    }
+    float hue = atan(lab.z, lab.y) / 6.283185307179586;
+    hue = hue - floor(hue);
+    vec3 k = tex_mixer(hue);
+    float sure = lt_smooth01(chroma / 0.04);
+    float vivid = lt_smooth01(chroma / 0.12);
+    float turned = (hue + k.x * sure) * 6.283185307179586;
+    float c2 = chroma * max(1.0 + k.y * sure, 0.0);
+    float l2 = lab.x * (1.0 + 0.4 * k.z * vivid);
+    return lt_oklab_inverse(vec3(l2, c2 * cos(turned), c2 * sin(turned)));
+}
+
+// Colour grading: a tint and a lightness for shadows, midtones and highlights.
+// The three ranges always add up to one, so a tone is never tinted twice over.
+vec3 finish_grade(vec3 rgb, Finish f) {
+    vec3 e = lt_srgb3(rgb);
+    float y = lt_luma(e);
+    float width = 0.12 + 0.6 * f.blending;
+    float pivot = 0.5 + 0.3 * f.balance;
+    float hi = lt_smooth01((y - pivot + width) / (2.0 * width));
+    float lo = 1.0 - hi;
+    float ws = lo * lo;
+    float wm = 2.0 * lo * hi;
+    float wh = hi * hi;
+    e = e + f.tint_s * ws + f.tint_m * wm + f.tint_h * wh;
+    e = e + vec3(f.lift.x * ws + f.lift.y * wm + f.lift.z * wh);
+    return lt_linear3(e);
+}
+
+// Darker or lighter corners, in stops, as light falls off in a lens.
+// `pos` is the pixel's place in the picture, -1..1 on each axis.
+vec3 finish_vignette(vec3 rgb, vec2 pos, Finish f) {
+    float r = sqrt(pos.x * pos.x + pos.y * pos.y) * 0.70710678;
+    float t = lt_smooth01((r - f.vignette_mid) / max(1.0 - f.vignette_mid, 1.0e-3));
+    return rgb * exp2(f.vignette * t);
+}
+
+// The finished picture. With every flag 0 and no vignette it comes back unchanged
+// (apart from negative values, which no picture has).
+vec3 finish_all(vec3 rgb, vec2 pos, Finish f) {
+    vec3 c = max(rgb, vec3(0.0));
+    if (f.curve > 0.5) {
+        c = finish_tone(c);
+    }
+    if (f.mixer > 0.5) {
+        c = max(finish_mixer(c), vec3(0.0));
+    }
+    if (f.grading > 0.5) {
+        c = finish_grade(c, f);
+    }
+    if (f.vignette != 0.0) {
+        c = finish_vignette(c, pos, f);
+    }
+    return c;
 }

@@ -5,6 +5,8 @@
     <!-- the app works as a darkroom on a device without a camera -->
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <!-- the monitor talks to a camera on a USB cable; everything else works without one -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- only for the sound of a video; video is recorded without it when refused -->

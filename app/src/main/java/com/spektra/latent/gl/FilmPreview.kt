@@ -4,7 +4,7 @@ import android.content.Context
 import android.graphics.SurfaceTexture
 import android.opengl.EGLSurface
 import android.opengl.GLES30
-import android.util.Log
+import com.spektra.latent.Journal
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.engine.FilmTables
 import com.spektra.latent.engine.LinearImage
@@ -59,6 +59,7 @@ class FilmPreview(context: Context) {
     private val app = context.applicationContext
     private val tables = FilmTables()
     private val gpu = FilmGpu()
+    private val finish = FinishGpu()
     private val source = SourceTexture()
     private var program: Program? = null
     // halation: the film's exposure, small, blurred
@@ -124,6 +125,7 @@ class FilmPreview(context: Context) {
         surface = null
         GlCore.makeCurrent(null)
         gpu.release()
+        finish.release()
         source.release()
         haloA.release()
         haloB.release()
@@ -151,7 +153,7 @@ class FilmPreview(context: Context) {
             try {
                 drew = drawPicture(f)
             } catch (t: Throwable) {
-                Log.e("latent-gl", "preview failed", t)
+                Journal.e("latent-gl", "preview failed", t)
                 onError?.invoke(t.message ?: "preview failed")
             }
         }
@@ -170,7 +172,7 @@ class FilmPreview(context: Context) {
         if (!gpu.ready) return false
         val grade = look.grade(f.meteredEv)
         val halation = FloatArray(3) { tables.halation[it] * look.halation / 100f }
-        val halo = f.mode == 0 && halation.any { it > 0f } && makeHalo(grade, tables.halation[3])
+        val halo = f.mode == 0 && halation.any { it > 0f } && makeHalo(grade, tables.halation[3], look.formatUm)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, width, height)
 
@@ -188,10 +190,11 @@ class FilmPreview(context: Context) {
         p.setInt("u_halo", Tex.HALO)
         if (halo) p.set("u_halation", halation[0], halation[1], halation[2]) else p.set("u_halation", 0f, 0f, 0f)
         p.setStruct("u_grade", ShaderText.GRADE, grade)
+        finish.bind(p, look)
         // grain as this screen shows it: one cell per screen pixel of the picture
         val shownLong = max(r[2], r[3])
-        val shownUm = FILM_LONG_EDGE_UM / max(shownLong, 1f)
-        val printUm = FILM_LONG_EDGE_UM / max(f.printLongEdge, 1)
+        val shownUm = look.formatUm / max(shownLong, 1f)
+        val printUm = look.formatUm / max(f.printLongEdge, 1)
         val amount = look.grain / 100f
         val film = tables.filmBlock(1f, look.printGain, amount, FilmEngine.grainScale(amount, shownUm, printUm), f.seed)
         p.setStruct("u_film", ShaderText.FILM, film)
@@ -211,7 +214,7 @@ class FilmPreview(context: Context) {
      * False when this GPU cannot render to float targets: the preview then
      * shows no halation, the finished print still has it.
      */
-    private fun makeHalo(grade: FloatArray, sigmaUm: Float): Boolean {
+    private fun makeHalo(grade: FloatArray, sigmaUm: Float, formatUm: Float): Boolean {
         if (haloFailed || !GlCore.floatTargets) return false
         val k = HALO_LONG_EDGE.toFloat() / max(source.width, source.height)
         val w = max(1, (source.width * min(k, 1f)).toInt())
@@ -233,7 +236,7 @@ class FilmPreview(context: Context) {
         Quad.draw()
 
         val b = blur ?: Program(ShaderText.QUAD_VERTEX, ShaderText.BLUR_FRAGMENT).also { blur = it }
-        val sigma = (1.25f * sigmaUm / FILM_LONG_EDGE_UM * max(w, h)).coerceIn(0.3f, 2.6f)
+        val sigma = (1.25f * sigmaUm / formatUm * max(w, h)).coerceIn(0.3f, 2.6f)
         b.use()
         b.set("u_rect", -1f, -1f, 2f, 2f)
         b.set("u_uv", 0f, 0f, 1f, 1f)
@@ -255,7 +258,5 @@ class FilmPreview(context: Context) {
         private const val HALO_LONG_EDGE = 512
         /** The curtain behind every picture, as a linear grey level for glClearColor (#0C0C0C). */
         const val CURTAIN = 12f / 255f
-        /** The long edge of a 35 mm frame as the engine counts it (film_format_mm = 35). */
-        const val FILM_LONG_EDGE_UM = 35000f
     }
 }

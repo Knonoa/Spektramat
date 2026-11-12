@@ -2,7 +2,7 @@ package com.spektra.latent.data
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.util.Log
+import com.spektra.latent.Journal
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -95,7 +95,7 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
                 job.before = before
                 job.after = after
             } catch (e: Exception) {
-                Log.w(TAG, "no big pixels for ${job.frame.name}", e)
+                Journal.w(TAG, "no big pixels for ${job.frame.name}", e)
             }
         }
         try {
@@ -113,7 +113,7 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
     }
 
     private suspend fun bigPixels(frame: Frame, look: Look): Pair<IntArray, IntArray> = withContext(Dispatchers.IO) {
-        Decoder.decode(frame.file, 96, look.lensShading).use { small ->
+        Decoder.decode(frame.file, 96, look.lensShading, look.aspect).use { small ->
             val original = FilmEngine.display(small)
             val film = FilmTables().use { tables ->
                 tables.bake(
@@ -121,7 +121,10 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
                     interLayer = look.interLayer > 0f, interLayerAmount = look.interLayer / 100f,
                     yShift = look.filterY, mShift = look.filterM,
                 )
-                FilmEngine.renderFast(small, tables, look.grade(frame.meteredEv), tables.filmBlock(1f, look.printGain, 0f, 0f, 1f))
+                FilmEngine.renderFast(
+                    small, tables, look.grade(frame.meteredEv), tables.filmBlock(1f, look.printGain, 0f, 0f, 1f),
+                    look.finish(), look.finishTable(),
+                )
             }
             try {
                 mosaic(original) to mosaic(film)

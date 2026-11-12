@@ -2,7 +2,7 @@ package com.spektra.latent.camera
 
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraMetadata
-import android.util.Log
+import com.spektra.latent.Journal
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
@@ -79,14 +79,15 @@ object Lenses {
             try {
                 infos[Camera2CameraInfo.from(info).cameraId] = info
             } catch (e: Exception) {
-                Log.w(TAG, "a camera could not be read", e)
+                Journal.w(TAG, "a camera could not be read", e)
             }
         }
+        for ((id, info) in infos) describe(id, info)
         val back = stops(infos, CameraSelector.LENS_FACING_BACK, CameraSelector.DEFAULT_BACK_CAMERA)
         val front = stops(infos, CameraSelector.LENS_FACING_FRONT, CameraSelector.DEFAULT_FRONT_CAMERA).filter { it.ratio > 0.95f }.take(1)
         val used = (back + front).map { it.cameraId }.toSet()
         val facts = used.associateWith { facts(it, infos.getValue(it)) }
-        for (s in back + front) Log.i(TAG, "lens ${s.label}x: camera ${s.cameraId} at zoom ${s.zoom}")
+        for (s in back + front) Journal.i(TAG, "lens ${s.label}x: camera ${s.cameraId} at zoom ${s.zoom}")
         return Survey(back, front, facts, infos)
     }
 
@@ -134,6 +135,43 @@ object Lenses {
         // a phone with no telephoto still gets a 2: the middle of its main sensor
         if (maxZoom >= 2f && stops.none { it.ratio in 1.5f..2.6f }) add(2f, mainId, 2f)
         return stops.sortedBy { it.ratio }
+    }
+
+    /**
+     * What a camera says about itself, into the log: the facts every lens and
+     * setting on the camera screen is derived from. When a phone shows the
+     * wrong lenses, this is what to read.
+     */
+    private fun describe(id: String, info: CameraInfo) {
+        try {
+            val c = Camera2CameraInfo.from(info)
+            fun lens(ci: Camera2CameraInfo): String {
+                val focal = ci.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.joinToString("/")
+                val size = ci.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                val pixels = ci.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+                return "focal $focal mm, sensor $size mm, $pixels px"
+            }
+            val zoom = info.zoomState.value
+            val intrinsic = try { info.intrinsicZoomRatio } catch (e: Exception) { Float.NaN }
+            Journal.i(
+                TAG,
+                "camera $id: facing ${info.lensFacing}, level ${c.getCameraCharacteristic(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)}, " +
+                    "zoom ${zoom?.minZoomRatio}..${zoom?.maxZoomRatio}, intrinsic $intrinsic, ${lens(c)}, " +
+                    "capabilities ${c.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.joinToString(",")}, " +
+                    "rates ${try { info.supportedFrameRateRanges.joinToString(",") } catch (e: Exception) { "?" }}",
+            )
+            val physical = try { info.physicalCameraInfos } catch (e: Exception) { emptySet() }
+            for (p in physical) {
+                try {
+                    val pc = Camera2CameraInfo.from(p)
+                    Journal.i(TAG, "camera $id has lens ${pc.cameraId}: ${lens(pc)}")
+                } catch (e: Exception) {
+                    Journal.i(TAG, "camera $id has a lens that could not be read: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Journal.w(TAG, "camera $id could not be described", e)
+        }
     }
 
     /** Focal length over sensor diagonal: proportional to magnification, comparable between cameras. */
