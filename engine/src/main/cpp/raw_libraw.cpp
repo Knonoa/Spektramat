@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 
 #include "dng_opcodes.hpp"
@@ -20,12 +21,54 @@ namespace {
 // is past 3 GB; refusing is honest, an allocation failure half-way is not.
 constexpr uint64_t kMaxPixels = 250ull * 1000 * 1000;
 
+// LibRaw's normal dcraw_process path stores every intermediate in ushort. It
+// therefore clips at black subtraction, white balance and camera conversion
+// before this backend ever sees a pixel. The app's contract is a scene-linear
+// float image, so the conversion below deliberately performs those
+// operations itself. The source samples are widened once, then remain
+// extended (below zero and above sensor white) until the display/export stage.
+inline float raw_sample(float value, float black, float white) {
+    return (value - black) / std::max(1.0f, white - black);
+}
+
+void float_demosaic(const std::vector<float>& cfa, int w, int h,
+                    const std::function<int(int, int)>& colour,
+                    std::vector<float>& rgb) {
+    rgb.assign((size_t)w * h * 3, 0.0f);
+    auto at = [&](int x, int y) -> float {
+        x = std::clamp(x, 0, w - 1); y = std::clamp(y, 0, h - 1);
+        return cfa[(size_t)y * w + x];
+    };
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+        const int c = colour(x, y);
+        float* d = rgb.data() + ((size_t)y * w + x) * 3;
+        d[c] = at(x, y);
+        // Malvar-He-Cutler 5x5 linear demosaic, matching the built-in reader.
+        const float center = at(x, y);
+        const float ew = at(x - 1, y) + at(x + 1, y), ns = at(x, y - 1) + at(x, y + 1);
+        const float ew2 = at(x - 2, y) + at(x + 2, y), ns2 = at(x, y - 2) + at(x, y + 2);
+        const float corners = at(x - 1, y - 1) + at(x + 1, y - 1) + at(x - 1, y + 1) + at(x + 1, y + 1);
+        if (c == 1) {
+            const int left = colour(x - 1, y);
+            const bool red_horizontal = left == 0 || (left == 1 && colour(x, y - 1) == 0);
+            const float horizontal = (5 * center + 4 * ew - ew2 + .5f * ns2 - corners) / 8;
+            const float vertical = (5 * center + 4 * ns - ns2 + .5f * ew2 - corners) / 8;
+            d[red_horizontal ? 0 : 2] = horizontal;
+            d[red_horizontal ? 2 : 0] = vertical;
+        } else {
+            d[1] = (4 * center + 2 * (ew + ns) - ew2 - ns2) / 8;
+            d[c == 0 ? 2 : 0] = (6 * center + 2 * corners - 1.5f * (ew2 + ns2)) / 8;
+        }
+    }
+}
+
 // LibRaw keeps decoding through corrupt or truncated sensor data and only
 // counts the incident. That counter is the one way to tell a real photograph
 // from rows of garbage, and it is not part of the public interface.
 class Raw : public LibRaw {
 public:
     unsigned data_errors() const { return libraw_internal_data.unpacker_data.data_error; }
+    bool needs_integer_corrections() { return is_phaseone_compressed() || is_canon_600(); }
 
     // ---- lens shading (dng_opcodes.hpp)
     //
@@ -36,7 +79,7 @@ public:
     // mosaic before white balance and demosaicing, the radial vignette on the
     // demosaiced image.
 
-    // Call after open_file(): reads the file's lists and hooks the pipeline.
+    // Call after open_file(): read the file's lists for the float developer.
     void use_lens_corrections(LensShading mode) {
         shading_ = mode;
         lens_ = LensCorrections();
@@ -46,67 +89,13 @@ public:
             // A list that does not parse is left out: no correction, never a wrong one.
             if (op.data && op.len) parse_opcode_list(static_cast<const uint8_t*>(op.data), op.len, lens_);
         }
-        if (!lens_.gain_maps.empty()) callbacks.pre_scalecolors_cb = &Raw::gain_maps_step;
-        if (!lens_.vignettes.empty()) callbacks.post_interpolate_cb = &Raw::vignette_step;
     }
 
     // How many of the file's shading opcodes apply to this sensor layout,
-    // whichever mode was asked for. Valid once dcraw_process() has run.
+    // whichever mode was asked for. Valid once develop_float() has run.
     int lens_opcodes() const { return (gain_maps_apply_ ? (int)lens_.gain_maps.size() : 0) + (int)lens_.vignettes.size(); }
 
 private:
-    static Raw* self(void* ctx) { return static_cast<Raw*>(static_cast<LibRaw*>(ctx)); }
-    static void gain_maps_step(void* ctx) { self(ctx)->apply_gain_maps_to_mosaic(); }
-    static void vignette_step(void* ctx) { self(ctx)->apply_vignette_to_image(); }
-
-    // imgdata.image holds the mosaic here: black already subtracted, one
-    // channel per colour of the filter (the second green is channel 3), at half
-    // size when the preview tier asked for it. Saturation is imgdata.color.maximum.
-    void apply_gain_maps_to_mosaic() {
-        const unsigned filters = imgdata.idata.filters;
-        const bool mono = filters == 0 && imgdata.idata.colors == 1;
-        const bool bayer = filters > 1000 && !libraw_internal_data.internal_output_params.fuji_width;
-        if (!imgdata.image || (!mono && !bayer)) return;   // X-Trans, linear RGB, Fuji's diagonal sensors
-        gain_maps_apply_ = true;
-        const int shrink = libraw_internal_data.internal_output_params.shrink;
-        const int stride = imgdata.sizes.iwidth;
-        const float white = imgdata.color.maximum > 0 ? (float)imgdata.color.maximum : 65535.0f;
-        apply_gain_maps(
-            lens_, imgdata.sizes.width, imgdata.sizes.height, shading_,
-            [&](int row, int col) {
-                const int c = mono ? 1 : FC(row, col);
-                return c == 3 ? 1 : c;
-            },
-            [&](int row, int col, float gain) {
-                ushort& v = imgdata.image[(size_t)(row >> shrink) * stride + (col >> shrink)][mono ? 0 : FC(row, col)];
-                // never past sensor white, and a sample already above it stays as it was
-                const float limit = std::max(white, (float)v);
-                v = (ushort)std::min(std::max((float)v * gain + 0.5f, 0.0f), std::min(limit, 65535.0f));
-            });
-    }
-
-    // After demosaicing imgdata.image is width x height, `colors` channels,
-    // white-balanced and scaled so that sensor white is 65535. The polynomial
-    // has no colour part: it is the darkening itself, so it is left alone when
-    // only the colour cast is being corrected.
-    void apply_vignette_to_image() {
-        if (!imgdata.image || shading_ != LensShading::full) return;
-        const int w = imgdata.sizes.width, h = imgdata.sizes.height;
-        const int colors = std::min(imgdata.idata.colors, 4);
-        for (const VignetteRadial& v : lens_.vignettes) {
-            const PreparedVignette prepared(v, w, h);
-            for (int y = 0; y < h; y++) {
-                ushort (*row)[4] = imgdata.image + (size_t)y * w;
-                for (int x = 0; x < w; x++) {
-                    const float gain = prepared.gain(y + 0.5, x + 0.5);
-                    for (int c = 0; c < colors; c++) {
-                        row[x][c] = (ushort)std::min(std::max((float)row[x][c] * gain + 0.5f, 0.0f), 65535.0f);
-                    }
-                }
-            }
-        }
-    }
-
     LensCorrections lens_;
     LensShading shading_ = LensShading::full;
     bool gain_maps_apply_ = false;
@@ -138,6 +127,96 @@ public:
         const uint64_t needed = row_bytes * imgdata.sizes.raw_height;
         const uint64_t file_size = (uint64_t)libraw_internal_data.internal_data.input->size();
         return (uint64_t)u.data_offset + needed > file_size;
+    }
+
+    // Develop the unpacked sensor samples in float, without LibRaw's dcraw
+    // ushort processing. This is intentionally conservative: Bayer files use
+    // the same MHC float demosaic as the built-in reader, while RGB RAWs retain
+    // their three planes. Unsupported sensor layouts are rejected by caller.
+    bool develop_float(android_io::LinearImage& out) {
+        const int w = imgdata.sizes.iwidth;
+        const int h = imgdata.sizes.iheight;
+        const int colours = imgdata.idata.colors;
+        if (!imgdata.image || w <= 0 || h <= 0 || (colours != 1 && colours != 3)) return false;
+        const bool cfa = imgdata.idata.filters != 0;
+        const float white = std::max(1.0f, (float)imgdata.color.maximum);
+        std::vector<float> planes((size_t)w * h * (cfa ? 1 : 3), 0.0f);
+        auto black_at = [&](int x, int y, int channel) {
+            const auto& c = imgdata.color;
+            float black = (float)c.black + c.cblack[channel];
+            if (c.cblack[4] && c.cblack[5] && (uint64_t)c.cblack[4] * c.cblack[5] <= LIBRAW_CBLACK_SIZE - 6) {
+                black += c.cblack[6 + y % c.cblack[4] * c.cblack[5] + x % c.cblack[5]];
+            }
+            return black;
+        };
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+            const ushort* p = imgdata.image[(size_t)y * w + x];
+            if (cfa) {
+                const int fc = FC(y, x);
+                const float black = black_at(x, y, std::clamp(fc, 0, 3));
+                planes[(size_t)y * w + x] = raw_sample((float)p[fc], black, white);
+            } else if (colours == 1) {
+                const float value = raw_sample((float)p[0], black_at(x, y, 0), white);
+                planes[((size_t)y * w + x) * 3] = value;
+            } else {
+                for (int c = 0; c < 3; ++c) {
+                    const float black = black_at(x, y, c);
+                    planes[((size_t)y * w + x) * 3 + c] = raw_sample((float)p[c], black, white);
+                }
+            }
+        }
+        std::vector<float> rgb;
+        if (cfa) {
+            if (!lens_.gain_maps.empty()) {
+                gain_maps_apply_ = true;
+                apply_gain_maps(lens_, w, h, shading_,
+                    [&](int y, int x) { const int c = FC(y, x); return c == 3 ? 1 : c; },
+                    [&](int y, int x, float gain) { planes[(size_t)y * w + x] *= gain; });
+            }
+            float_demosaic(planes, w, h, [&](int x, int y) {
+                const int fc = FC(y & 7, x & 1); return fc == 3 ? 1 : std::clamp(fc, 0, 2);
+            }, rgb);
+        } else if (colours == 1) {
+            if (!lens_.gain_maps.empty()) {
+                gain_maps_apply_ = true;
+                apply_gain_maps(lens_, w, h, shading_,
+                    [&](int, int) { return 1; },
+                    [&](int y, int x, float gain) { planes[((size_t)y * w + x) * 3] *= gain; });
+            }
+            rgb.assign((size_t)w * h * 3, 0.0f);
+            for (size_t i = 0; i < (size_t)w * h; ++i) rgb[i * 3 + 0] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = planes[i * 3];
+        } else {
+            rgb = std::move(planes);
+        }
+        if (shading_ == LensShading::full) for (const VignetteRadial& v : lens_.vignettes) {
+            const PreparedVignette prepared(v, w, h);
+            for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                const float gain = prepared.gain(y + 0.5, x + 0.5);
+                for (int c = 0; c < 3; ++c) rgb[((size_t)y * w + x) * 3 + c] *= gain;
+            }
+        }
+        // As-shot WB, normalized to green, then the camera-to-sRGB matrix.
+        float wb[3] = {imgdata.color.cam_mul[0], imgdata.color.cam_mul[1], imgdata.color.cam_mul[2]};
+        if (!(wb[0] > 0) || !(wb[1] > 0) || !(wb[2] > 0)) { wb[0] = wb[1] = wb[2] = 1.0f; }
+        if (colours == 1) wb[0] = wb[1] = wb[2] = 1.0f;
+        const float wg = wb[1]; for (float& v : wb) v /= wg;
+        float matrix[3][3] = {};
+        bool has_matrix = false;
+        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) {
+            matrix[r][c] = imgdata.color.rgb_cam[r][c]; has_matrix |= std::fabs(matrix[r][c]) > 1e-8f;
+        }
+        if (!has_matrix || colours == 1) {
+            for (auto& row : matrix) for (float& v : row) v = 0;
+            for (int c = 0; c < 3; ++c) matrix[c][c] = 1.0f;
+        }
+        for (size_t i = 0; i < (size_t)w * h; ++i) {
+            const float r = rgb[i * 3] * wb[0], g = rgb[i * 3 + 1] * wb[1], b = rgb[i * 3 + 2] * wb[2];
+            rgb[i * 3] = matrix[0][0] * r + matrix[0][1] * g + matrix[0][2] * b;
+            rgb[i * 3 + 1] = matrix[1][0] * r + matrix[1][1] * g + matrix[1][2] * b;
+            rgb[i * 3 + 2] = matrix[2][0] * r + matrix[2][1] * g + matrix[2][2] * b;
+        }
+        out.width = w; out.height = h; out.rgb = std::move(rgb);
+        return true;
     }
 };
 
@@ -223,6 +302,9 @@ void configure_before_open(LibRaw& raw) {
     libraw_output_params_t& p = raw.imgdata.params;
     p.use_camera_wb = 1;       // the as-shot white balance, like the in-tree reader's AsShotNeutral
     p.use_camera_matrix = 1;   // the file's own colour profile when it carries one (always for DNG)
+    // Floating DNGs must not be silently quantized to LibRaw's ushort buffer.
+    // Until the float-sensor layout is supported here they fail explicitly.
+    raw.imgdata.rawparams.options &= ~LIBRAW_RAWOPTIONS_CONVERTFLOAT_TO_INT;
     raw.set_dataerror_handler(ignore_data_error, nullptr);
 }
 
@@ -265,25 +347,19 @@ bool libraw_decode(const std::string& path, int max_edge, android_io::LinearImag
     }
     raw->use_lens_corrections(options.lens_shading ? LensShading::full : LensShading::colour_only);
 
-    const int long_edge = std::max(raw->imgdata.sizes.width, raw->imgdata.sizes.height);
     libraw_output_params_t& p = raw->imgdata.params;
-    p.output_bps = 16;           // 16-bit linear; converted to float below
-    p.output_color = 1;          // sRGB primaries; dcraw_process applies no display curve itself
+    p.output_bps = 16;           // retained for LibRaw metadata; custom path stays float
+    p.output_color = 1;          // camera matrix targets linear sRGB
     p.no_auto_bright = 1;        // exposure belongs to the film pipeline
-    p.no_auto_scale = 0;         // scale_colors puts sensor white at 1.0: the output contract
-    p.use_fuji_rotate = 1;       // Fuji's diagonal sensors are squared up while unpacking
-    p.highlight = 0;             // clip: saturated areas come out neutral, never magenta
-    p.user_qual = -1;            // LibRaw's own choice of demosaic for the sensor
+    p.no_auto_scale = 1;         // custom float route normalizes after widening samples
+    p.use_fuji_rotate = 0;       // unsupported here; never silently quantize its layout
+    p.highlight = 0;             // no automatic highlight repair
+    p.user_qual = -1;            // unused: shared float MHC demosaic is used
     p.gamm[0] = p.gamm[1] = 1.0; // linear output, not a display gamma
     // user_flip stays at its default (-1). LibRaw never rotates imgdata.image --
     // only its file writers do -- and raw2image_start() copies user_flip over
     // the file's own flip, so setting it to 0 erased the orientation we read
     // back below and every portrait frame came out lying on its side.
-    //
-    // Preview tier: with the long edge at least twice the target, unpack at half
-    // size. That skips the full-resolution demosaic and a full-size float layer.
-    if (max_edge > 0 && long_edge >= max_edge * 2) p.half_size = 1;
-
     const unsigned errors_before = raw->data_errors();
     rc = raw->unpack();
     if (rc != LIBRAW_SUCCESS) {
@@ -296,43 +372,48 @@ bool libraw_decode(const std::string& path, int max_edge, android_io::LinearImag
         error = describe(LIBRAW_DATA_ERROR);
         return false;
     }
-    rc = raw->dcraw_process();
-    if (rc != LIBRAW_SUCCESS) {
-        error = describe(rc);
+    if ((!raw->imgdata.rawdata.raw_image && !raw->imgdata.rawdata.color3_image && !raw->imgdata.rawdata.color4_image) || raw->imgdata.idata.colors == 4 || raw->needs_integer_corrections() || raw->imgdata.idata.is_foveon ||
+        (raw->imgdata.idata.filters != 0 && raw->imgdata.idata.filters < 1000) ||
+        raw->get_internal_data_pointer()->internal_output_params.fuji_width) {
+        error = "这种 RAW 的通道布局暂不支持无损浮点解码";
+        return false;
+    }
+    // raw2image_ex(0) copies unpacked sensor words without LibRaw's CLIP()
+    // black subtraction. Widening occurs in develop_float before WB/matrix.
+    p.half_size = 0; // CFA float demosaic precedes proxy downsampling.
+    rc = raw->raw2image_ex(0);
+    if (rc != LIBRAW_SUCCESS || !raw->develop_float(out)) {
+        error = rc != LIBRAW_SUCCESS ? describe(rc) : "RAW 浮点开发失败";
         return false;
     }
 
-    const int w = raw->imgdata.sizes.width;
-    const int h = raw->imgdata.sizes.height;
-    const int colors = raw->imgdata.idata.colors;
-    if (w <= 0 || h <= 0 || raw->imgdata.image == nullptr || (colors != 1 && colors != 3)) {
-        error = "LibRaw 输出的图像为空或通道数异常";
-        return false;
-    }
+    const int w = raw->imgdata.sizes.iwidth;
+    const int h = raw->imgdata.sizes.iheight;
 
-    // After dcraw_process imgdata.image is 16-bit linear sRGB: camera matrix,
-    // camera white balance and white-point scaling are done. What remains is
-    // 0..1 and the orientation, written in one pass. A monochrome sensor leaves
-    // a single plane, which is grey, not red.
+    // The custom route is already scene-linear sRGB. Apply orientation while
+    // copying; a monochrome sensor remains neutral grey.
     const int orientation = exif_from_flip(raw->imgdata.sizes.flip);
     const bool swap = orientation_swaps_axes(orientation);
     const int lens_opcodes = raw->lens_opcodes();
     android_io::LinearImage image;
-    image.width = swap ? h : w;
-    image.height = swap ? w : h;
-    image.rgb.assign((size_t)image.width * image.height * 3, 0.0f);
-
-    const float inv = 1.0f / 65535.0f;
-    for (int y = 0; y < image.height; y++) {
-        float* dst = image.rgb.data() + (size_t)y * image.width * 3;
-        for (int x = 0; x < image.width; x++) {
-            int sx = 0, sy = 0;
-            oriented_source(x, y, orientation, w, h, sx, sy);
-            const ushort* src = raw->imgdata.image[(size_t)sy * w + sx];
-            dst[(size_t)x * 3 + 0] = src[0] * inv;
-            dst[(size_t)x * 3 + 1] = src[colors == 1 ? 0 : 1] * inv;
-            dst[(size_t)x * 3 + 2] = src[colors == 1 ? 0 : 2] * inv;
+    if (orientation == 1) {
+        image = std::move(out);
+    } else {
+        image.width = swap ? h : w;
+        image.height = swap ? w : h;
+        image.rgb.assign((size_t)image.width * image.height * 3, 0.0f);
+        for (int y = 0; y < image.height; y++) {
+            float* dst = image.rgb.data() + (size_t)y * image.width * 3;
+            for (int x = 0; x < image.width; x++) {
+                int sx = 0, sy = 0;
+                oriented_source(x, y, orientation, w, h, sx, sy);
+                const float* src = out.rgb.data() + ((size_t)sy * w + sx) * 3;
+                dst[(size_t)x * 3 + 0] = src[0];
+                dst[(size_t)x * 3 + 1] = src[1];
+                dst[(size_t)x * 3 + 2] = src[2];
+            }
         }
+        out = {}; // release the un-oriented float buffer before proxy scaling.
     }
     raw.reset();   // release LibRaw's work buffers before the scaled copy is allocated
 

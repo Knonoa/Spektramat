@@ -74,7 +74,7 @@ fun SettingsScreen(monitor: Monitor) {
     val shell = LocalShell.current
     val appearance = remember { context.getSharedPreferences("appearance", Context.MODE_PRIVATE) }
     val camera = remember { context.getSharedPreferences("camera", Context.MODE_PRIVATE) }
-    var edge by remember { mutableIntStateOf(appearance.getInt("exportEdge", 3072)) }
+    var edge by remember { mutableIntStateOf(appearance.getInt("exportEdge", 0)) }
     var printOnRelease by remember { mutableStateOf(camera.getBoolean("printOnRelease", false)) }
 
     GlassPage(
@@ -113,7 +113,7 @@ fun SettingsScreen(monitor: Monitor) {
                 Section("冲印")
                 Card {
                     Line("默认导出长边", "单位是像素。比原片大的时候按原片的尺寸出。") {
-                        Seg(listOf(2048, 3072, 4096).map { Opt(it.toString(), it.toString()) }, edge.toString(), {
+                        Seg(listOf(0, 2048, 3072, 4096).map { Opt(it.toString(), if (it == 0) "原尺寸" else it.toString()) }, edge.toString(), {
                             edge = it.toInt()
                             appearance.edit().putInt("exportEdge", edge).apply()
                         }, style = SegStyle.Small)

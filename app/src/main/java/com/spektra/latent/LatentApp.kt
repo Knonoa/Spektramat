@@ -8,6 +8,7 @@ import com.spektra.latent.data.PrintDesk
 import com.spektra.latent.data.Recipes
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.gl.GlCore
+import com.spektra.latent.update.UpdateManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -34,12 +35,14 @@ sealed interface Startup {
 class LatentApp : Application() {
     /** Work that belongs to the app, not to a screen: it survives leaving the screen that started it. */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    internal val updates by lazy { UpdateManager(this, scope) }
 
     private val _startup = MutableStateFlow<Startup>(Startup.Loading)
     val startup: StateFlow<Startup> = _startup
 
     override fun onCreate() {
         super.onCreate()
+        updates.check(manual = false)
         if (BuildConfig.DEBUG) Journal.open(this)   // before anything else can speak
         GlCore   // start the GL thread now; its context is ready before the first picture
         scope.launch(Dispatchers.IO) {

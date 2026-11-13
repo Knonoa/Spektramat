@@ -8,6 +8,7 @@
 
 #include "raw_decode.hpp"
 #include "raw_libraw.hpp"
+#include "raster_precision.hpp"
 #include "image_orientation.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -176,6 +177,10 @@ bool is_raw(const std::string& path) {
 
 bool supported(const std::string& path) {
     if (is_raw(path)) return true;
+    if (precision_raster(path)) {
+        int w=0,h=0; std::string error;
+        return raster_probe(path,w,h,error);
+    }
     int w = 0, h = 0, n = 0;
     return stbi_info(path.c_str(), &w, &h, &n) != 0 && w > 0 && h > 0;
 }
@@ -194,6 +199,7 @@ bool probe(const std::string& path, int& width, int& height, std::string& error)
         // Not developable: the embedded preview's size, or the reason.
         return spk::raw::probe(path, width, height, error);
     }
+    if (precision_raster(path)) return raster_probe(path,width,height,error);
     int w = 0, h = 0, n = 0;
     if (!stbi_info(path.c_str(), &w, &h, &n) || w <= 0 || h <= 0) {
         error = "unsupported image format";
@@ -211,6 +217,7 @@ bool probe(const std::string& path, int& width, int& height, std::string& error)
 bool decode_linear(const std::string& path, int max_edge, LinearImage& out, std::string& error,
                    const DecodeOptions& options) {
     if (is_raw(path)) return decode_raw(path, max_edge, options, out, error);
+    if (precision_raster(path)) return raster_decode(path,max_edge,out,error);
     std::vector<uint8_t> bytes;
     if (!read_file(path, bytes, error)) return false;
 

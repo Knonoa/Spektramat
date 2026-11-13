@@ -803,7 +803,7 @@ inline float normalized(const Layout& l, const std::vector<uint16_t>& src, int x
         black = l.black[(size_t)std::clamp<int>(idx, 0, (int)l.black.size() - 1)];
     }
     const double v = ((double)src[i] - black) / std::max(1.0, white - black);
-    return (float)std::clamp(v, 0.0, 4.0);
+    return (float)v;
 }
 
 void normalize(const Layout& l, const std::vector<uint16_t>& src, std::vector<float>& dst) {
@@ -859,9 +859,9 @@ void demosaic(const Layout& l, const std::vector<float>& cfa, int w, int h, std:
                 out[color == 0 ? 2 : 0] = diag;
             }
             float* o = rgb.data() + ((size_t)y * w + x) * 3;
-            o[0] = std::max(0.0f, out[0]);
-            o[1] = std::max(0.0f, out[1]);
-            o[2] = std::max(0.0f, out[2]);
+            o[0] = out[0];
+            o[1] = out[1];
+            o[2] = out[2];
         }
     }
 }
@@ -1027,31 +1027,7 @@ bool camera_to_srgb(const Layout& l, Mat3& out) {
     return true;
 }
 
-// 高光：先把洋红裁切（R/B 溢出而 G 未溢出）拉回，再做软膝。
-inline void fix_highlight(float& r, float& g, float& b) {
-    const float maxc = std::max(r, std::max(g, b));
-    if (maxc <= 0.5f) return;
-    const float outer = std::clamp((maxc - 0.5f) / 1.0f, 0.0f, 1.0f);
-    const float magenta = std::max(0.0f, std::min(r, b) - g);
-    if (magenta > 0.0f) {
-        const float target = std::min(r, b) * 0.8f + (r + b) * 0.5f * 0.2f;
-        g += std::max(0.0f, target - g) * outer;
-    }
-    const float residual = std::max(0.0f, std::min(r, b) - g);
-    g += residual * outer;
-
-    const float hi = std::max(r, std::max(g, b));
-    const float lo = std::min(r, std::min(g, b));
-    if (hi > 0.85f) {
-        const float knee = std::clamp((hi - 0.85f) / 0.4f, 0.0f, 1.0f);
-        const float neutral = hi;   // 压缩成中性亮度，避免色相偏转
-        r = r * (1.0f - knee * 0.5f) + neutral * knee * 0.5f;
-        g = g * (1.0f - knee * 0.5f) + neutral * knee * 0.5f;
-        b = b * (1.0f - knee * 0.5f) + neutral * knee * 0.5f;
-        (void)lo;
-    }
-}
-
+// White balance and camera matrices retain extended values without automatic highlight repair.
 void apply_color(const Layout& l, std::vector<float>& rgb) {
     Mat3 m;
     const bool ok = camera_to_srgb(l, m);
@@ -1064,9 +1040,8 @@ void apply_color(const Layout& l, std::vector<float>& rgb) {
         for (size_t i = 0; i + 2 < rgb.size(); i += 3) {
             for (int c = 0; c < 3; c++) {
                 const double gain = neutral[c] > 0 ? 1.0 / neutral[c] : 1.0;
-                rgb[i + c] = (float)std::clamp(rgb[i + c] * gain, 0.0, 4.0);
+                rgb[i + c] = (float)(rgb[i + c] * gain);
             }
-            fix_highlight(rgb[i], rgb[i + 1], rgb[i + 2]);
         }
         return;
     }
@@ -1074,10 +1049,8 @@ void apply_color(const Layout& l, std::vector<float>& rgb) {
         const double r = rgb[i], g = rgb[i + 1], b = rgb[i + 2];
         float o[3];
         for (int row = 0; row < 3; row++) {
-            o[row] = (float)std::max(
-                0.0, m.m[row * 3 + 0] * r + m.m[row * 3 + 1] * g + m.m[row * 3 + 2] * b);
+            o[row] = (float)(m.m[row * 3 + 0] * r + m.m[row * 3 + 1] * g + m.m[row * 3 + 2] * b);
         }
-        fix_highlight(o[0], o[1], o[2]);
         rgb[i] = o[0];
         rgb[i + 1] = o[1];
         rgb[i + 2] = o[2];
@@ -1340,9 +1313,8 @@ enum class Stage { container, layout, pixels, finished };
 
 // Develops the file's own sensor data from an opened container. It never
 // touches the embedded preview; on failure `out` is left empty.
-// A corrected sample never passes sensor white: the camera's own pipeline pins
-// it there (as the DNG SDK does), and a sample already above stays as it was.
-inline void shade(float& v, float gain) { v = std::min(v * gain, std::max(v, 1.0f)); }
+// Lens-shading corrections retain values above sensor white and below black.
+inline void shade(float& v, float gain) { v *= gain; }
 
 // The file's gain maps, applied to the normalised sensor samples in place.
 int apply_lens_gains(const Layout& l, std::vector<float>& plane, LensShading mode) {

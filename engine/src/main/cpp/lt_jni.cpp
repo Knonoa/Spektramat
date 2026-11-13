@@ -388,6 +388,24 @@ NATIVE(jlong, fromBitmap)(JNIEnv* env, jobject, jobject bitmap) {
     return publish(std::move(img));
 }
 
+// Export storage: float32 pixels, separate from any Android preview bitmap.
+NATIVE(jlong, newFloatImage)(JNIEnv* env, jobject, jint width, jint height) {
+    if (width <= 0 || height <= 0 || (uint64_t)width * height > 256ull * 1024 * 1024) {
+        throw_io(env, "invalid float image size");
+        return 0;
+    }
+    try {
+        auto out = std::make_shared<LinearImage>();
+        out->width = width; out->height = height;
+        out->rgb.resize((size_t)width * height * 3);
+        out->developer = "float-export";
+        return publish(std::move(out));
+    } catch (const std::bad_alloc&) {
+        throw_io(env, "out of memory");
+        return 0;
+    }
+}
+
 NATIVE(jlong, scaled)(JNIEnv* env, jobject, jlong id, jint maxEdge) {
     auto src = image(id);
     if (!src) {
@@ -400,6 +418,25 @@ NATIVE(jlong, scaled)(JNIEnv* env, jobject, jlong id, jint maxEdge) {
         throw_io(env, "out of memory");
         return 0;
     }
+}
+
+// Resize finished samples in linear light, never on their encoded display values.
+NATIVE(jlong, scaledPhoto)(JNIEnv* env, jobject, jlong id, jint maxEdge, jstring space, jboolean encoded) {
+    auto src = image(id);
+    if (!src) { throw_io(env, "picture released"); return 0; }
+    try {
+        const std::string name = str(env, space);
+        spk::output_color_space(name);
+        LinearImage linear = *src;
+        if (encoded == JNI_TRUE)
+            for (float& v : linear.rgb) v = spk::output_decode(v, name);
+        auto out = std::make_shared<LinearImage>(spk::android_io::scaled_linear(linear, maxEdge));
+        if (encoded == JNI_TRUE)
+            for (float& v : out->rgb) v = spk::output_encode(v, name);
+        return publish(std::move(out));
+    } catch (const std::bad_alloc&) { throw_io(env, "out of memory"); }
+      catch (const std::string& e) { throw_io(env, e); }
+    return 0;
 }
 
 // The rectangle x, y, w, h of a picture, as a new picture.
@@ -1049,7 +1086,7 @@ NATIVE(jstring, develop)(JNIEnv* env, jobject, jlong imageId, jfloatArray jgrade
                          jboolean scanFilm, jfloatArray jlook, jfloatArray jfinish, jfloatArray jfinishTable,
                          jobjectArray jrebate, jfloatArray jrebateNumbers, jint lane,
                          jlong seed, jobject bitmap, jobject listener, jfloatArray jmodel, jint photoMode,
-                         jstring outputColorSpace) {
+                         jstring outputColorSpace, jlong outputImage) {
     if ((photoMode != 0 && photoMode != 1) || lane < 0 || lane > 2)
         return jstr(env, "invalid photo render route");
     auto img = image(imageId);
@@ -1059,6 +1096,8 @@ NATIVE(jstring, develop)(JNIEnv* env, jobject, jlong imageId, jfloatArray jgrade
         !read_floats(env, jfinish, finish, lt::kFinishFloats) ||
         !read_floats(env, jfinishTable, finish_table.data(), lt::kFinishTableFloats))
         return jstr(env, "bad arguments");
+    if (photoMode == 0 && img->preview_only)
+        return jstr(env, "RAW sensor decoding unavailable; embedded preview cannot be exported");
     const bool finished = !lt::finish_is_neutral(finish);
     spk::RenderParams p;
     if (!read_rebate(env, jrebate, jrebateNumbers, p)) return jstr(env, "bad arguments");
@@ -1075,8 +1114,13 @@ NATIVE(jstring, develop)(JNIEnv* env, jobject, jlong imageId, jfloatArray jgrade
             return jstr(env, "the film's edge cannot be laid out");
         }
     }
-    AndroidBitmapInfo info;
-    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS ||
+    const auto float_image = outputImage ? image(outputImage) : nullptr;
+    AndroidBitmapInfo info{};
+    if (outputImage) {
+        if (!float_image || float_image == img || float_image->width != out_w || float_image->height != out_h)
+            return jstr(env, "float output does not match the picture");
+        info.width = out_w; info.height = out_h;
+    } else if (!bitmap || AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS ||
         (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888 && info.format != ANDROID_BITMAP_FORMAT_RGBA_F16) ||
         (int)info.width != out_w || (int)info.height != out_h)
         return jstr(env, "bitmap does not match the picture");
@@ -1084,9 +1128,9 @@ NATIVE(jstring, develop)(JNIEnv* env, jobject, jlong imageId, jfloatArray jgrade
     p.film_stock = str(env, film);
     p.print_stock = str(env, paper);
     p.scan_film = scanFilm == JNI_TRUE;
-    // Scene corrections precede reference metering. The engine applies auto
-    // exposure to the current frame, then camera EV exactly once. A stored
-    // import-time reading is metadata, not a second exposure multiplier.
+    // Scene corrections precede optional reference metering. Saved-photo
+    // orders disable metering; manual EV is still applied exactly once.
+    // Import-time readings are metadata, not exposure multipliers.
     p.exposure_preapplied = false;
     p.exposure_ev = look[14];
     p.print_exposure = look[0];
@@ -1095,7 +1139,7 @@ NATIVE(jstring, develop)(JNIEnv* env, jobject, jlong imageId, jfloatArray jgrade
     p.output_color_space = str(env, outputColorSpace);
     try { spk::output_color_space(p.output_color_space); }
     catch (const std::string& e) { return jstr(env, e); }
-    const bool float_output = info.format == ANDROID_BITMAP_FORMAT_RGBA_F16;
+    const bool float_output = float_image || info.format == ANDROID_BITMAP_FORMAT_RGBA_F16;
     if (!float_output && p.output_color_space != "sRGB")
         return jstr(env, "wide-gamut photo requires F16 bitmap");
     // The reference uses its database neutral pack plus the requested shifts.
@@ -1126,7 +1170,7 @@ NATIVE(jstring, develop)(JNIEnv* env, jobject, jlong imageId, jfloatArray jgrade
     cancel_flag.store(false);
     std::string error;
     void* pixels = nullptr;
-    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS)
+    if (!float_image && AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS)
         return jstr(env, "bitmap could not be written");
     try {
         // A proof source may be a fresh scaled copy of the same photograph.
@@ -1154,6 +1198,11 @@ NATIVE(jstring, develop)(JNIEnv* env, jobject, jlong imageId, jfloatArray jgrade
                 w == (int)info.width && h == (int)info.height) {
                 if (!float_output) {
                     lt::finish_planes(finish, finish_table.data(), r, g, b, w, h, (uint8_t*)pixels, p.output_cctf_encoding);
+                } else if (float_image) {
+                    lt::finish_float_planes(finish, finish_table.data(), r, g, b, w, h, float_image->rgb.data());
+                    if (p.output_cctf_encoding) {
+                        for (float& value : float_image->rgb) value = spk::output_encode(value, p.output_color_space);
+                    }
                 } else {
                     std::vector<float> rgb((size_t)w * h * 3);
                     lt::finish_float_planes(finish, finish_table.data(), r, g, b, w, h, rgb.data());
@@ -1188,7 +1237,7 @@ NATIVE(jstring, develop)(JNIEnv* env, jobject, jlong imageId, jfloatArray jgrade
     } catch (const std::exception& e) {
         error = e.what();
     }
-    AndroidBitmap_unlockPixels(env, bitmap);
+    if (!float_image) AndroidBitmap_unlockPixels(env, bitmap);
     if (lane != 1 || !error.empty()) engine.drop_caches();
     if (env->ExceptionCheck()) return nullptr;   // the listener threw: let it surface
     return error.empty() ? nullptr : jstr(env, error);

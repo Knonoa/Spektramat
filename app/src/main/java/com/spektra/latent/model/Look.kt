@@ -13,7 +13,7 @@ import kotlin.math.pow
  * meets it: the scene (corrections before the film), the film, the print.
  *
  * It is plain data: saved as JSON with the frame, compared for undo, turned
- * into the engine's numbers by [grade] and [order]. Every number is in the
+ * into the engine's numbers by [grade], [photoOrder] and [order]. Every number is in the
  * unit its control shows.
  */
 data class Look(
@@ -93,12 +93,12 @@ data class Look(
     /** The part of this look a recipe keeps: everything [withRecipe] hands on, on an untouched scene. */
     fun asRecipe(): Look = Look().withRecipe(this).copy(date = date.copy(manual = ""))
 
-    /** Fixed exposure for video and source-adjustment previews; full photos meter natively. */
+    /** Exposure gain for video, live metering and source-adjustment previews. */
     fun grade(meteredEv: Float): FloatArray {
         return photoGrade().also { it[3] = 2f.pow(exposure + meteredEv) }
     }
 
-    /** Scene corrections before reference auto-exposure and camera EV. */
+    /** Scene corrections before the engine applies exposure EV exactly once. */
     fun photoGrade(): FloatArray {
         val wb = FilmEngine.whiteBalance(temperature, tint)
         return floatArrayOf(
@@ -117,7 +117,7 @@ data class Look(
     fun finish(): FloatArray = Finishing.block(this)
     fun finishTable(): FloatArray = Finishing.table(this)
 
-    /** What the engine needs for the finished print. */
+    /** Reference parameters for live view, LUT baking and engine validation. */
     fun order(seed: Long, shooting: Shooting? = null, frameSeed: Int = 1, number: Int = 0) = PrintOrder(
         film = film, paper = paper, scanFilm = scanFilm,
         printExposure = printGain, yShift = filterY, mShift = filterM,
@@ -133,6 +133,18 @@ data class Look(
         exposureEv = exposure,
         model = model,
     )
+
+    /**
+     * Saved photographs already have an exposure. Keep their scene brightness
+     * instead of metering white/black subjects back to middle grey. Disable
+     * print compensation too, so manual scene EV remains visible on the print.
+     * Apply this at rendering time to cover old photos and imported recipes;
+     * the stock/paper's fixed grey calibration remains enabled.
+     */
+    fun photoOrder(seed: Long, shooting: Shooting? = null, frameSeed: Int = 1, number: Int = 0) =
+        order(seed, shooting, frameSeed, number).copy(
+            model = model.copy(autoExposure = false, printExposureCompensation = false),
+        )
 
     /** The same look on another stock; the paper stays when it suits the new stock, else the stock's own. */
     fun withFilm(id: String): Look {
@@ -260,10 +272,9 @@ object Controls {
         Control(id, label, -100f, 100f, 1f, 0f, 50f, ::signed, get, set)
 
     val scene = listOf(
-        // The workbench's exposure is an image-brightness control. Reference
-        // camera EV still runs after metering, but automatic print compensation
-        // must not cancel the change the person is making. Restored looks keep
-        // their original model until exposure is explicitly edited.
+        // The exposure slider changes image brightness. photoOrder also
+        // enforces this for restored looks that have never touched the slider;
+        // reference/live orders retain the edited compensation preference.
         Control("exposure", "曝光", -4f, 4f, 0.05f, 0f, 1f, ::ev, { it.exposure }) { l, v ->
             l.copy(exposure = v, model = l.model.copy(printExposureCompensation = false))
         },

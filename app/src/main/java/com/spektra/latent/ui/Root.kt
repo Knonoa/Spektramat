@@ -36,6 +36,8 @@ import com.spektra.latent.ui.camera.CameraScreen
 import com.spektra.latent.ui.library.LabScreen
 import com.spektra.latent.ui.monitor.MonitorScreen
 import com.spektra.latent.ui.settings.SettingsScreen
+import com.spektra.latent.ui.settings.UpdateReminder
+import com.spektra.latent.ui.settings.UpdateScreen
 import com.spektra.latent.ui.table.TableScreen
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -51,6 +53,7 @@ sealed interface Screen {
     data object Library : Screen
     data object Table : Screen
     data object Settings : Screen
+    data object Updates : Screen
 }
 
 @Composable
@@ -165,12 +168,14 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
         shortName(FilmEngine.catalog.film(look.film)?.name ?: "")
     }
     val onTable by produceState(0, screen) { value = s.table.load().placements.size }
+    val update by app.updates.state.collectAsStateWithLifecycle()
     val places = listOf(
         Place(Screen.Monitor, Glyph.Monitor, "监视器", s.monitor.model.takeIf { s.monitor.connected && it.isNotEmpty() }),
         Place(Screen.Camera, Glyph.Camera, "相机", cameraFilm.ifEmpty { null }),
         Place(Screen.Library, Glyph.Lab, "冲印室", if (frames.isEmpty()) null else "${frames.size} 张"),
         Place(Screen.Table, Glyph.Table, "观片台", if (onTable == 0) null else "$onTable 张"),
         Place(Screen.Settings, Glyph.Settings, "设置"),
+        Place(Screen.Updates, Glyph.Download, "检查更新", update.release?.let { "新版本" }),
     )
 
     AppShell(
@@ -223,9 +228,11 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
                     onOpen = { toBench(it, from = Screen.Camera) },
                 )
                 Screen.Settings -> SettingsScreen(s.monitor)
+                Screen.Updates -> UpdateScreen(app.updates)
             }
         }
         ImportNotices(s.library)
+        UpdateReminder(app.updates) { screen = Screen.Updates }
         // over every page: the small sign that a print is under way somewhere else than on the bench
         PrintOverlay(s.prints, bench?.id?.takeIf { screen == Screen.Library && tab == 0 })
     }

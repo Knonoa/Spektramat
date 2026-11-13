@@ -1,8 +1,7 @@
 package com.spektra.latent.data
 
 import android.content.Context
-import android.graphics.Bitmap
-import com.spektra.latent.engine.PhotoModel
+import com.spektra.latent.engine.PhotoPixels
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -10,8 +9,8 @@ import java.nio.ByteOrder
 /** Lossless float TIFF for wide-gamut/linear prints; samples keep their output
  * encoding and may be negative or above white. The ICC identifies both. */
 internal object FloatTiff {
-    fun write(context: Context, bitmap: Bitmap, model: PhotoModel, output: OutputStream) {
-        require(bitmap.config == Bitmap.Config.RGBA_F16)
+    fun write(context: Context, image: PhotoPixels, output: OutputStream) {
+        val model = image.model
         val key = when (model.outputColorSpace) {
             "Display P3" -> "p3"
             "Adobe RGB (1998)" -> "adobe"
@@ -29,15 +28,15 @@ internal object FloatTiff {
         val descriptionOffset = sampleOffset + 6
         val iccOffset = (descriptionOffset + description.size + 3) and -4
         val pixelOffset = (iccOffset + icc.size + 3) and -4
-        val pixelBytes = bitmap.width.toLong() * bitmap.height * 12
+        val pixelBytes = image.width.toLong() * image.height * 12
         require(pixelOffset + pixelBytes <= 0xffffffffL) { "TIFF exceeds 4 GiB" }
         val header = ByteBuffer.allocate(pixelOffset).order(ByteOrder.LITTLE_ENDIAN)
         header.put('I'.code.toByte()).put('I'.code.toByte()).putShort(42).putInt(8).putShort(entries.toShort())
         fun tag(id: Int, type: Int, count: Int, value: Int) {
             header.putShort(id.toShort()).putShort(type.toShort()).putInt(count).putInt(value)
         }
-        tag(256, 4, 1, bitmap.width)
-        tag(257, 4, 1, bitmap.height)
+        tag(256, 4, 1, image.width)
+        tag(257, 4, 1, image.height)
         tag(258, 3, 3, bitsOffset)
         tag(259, 3, 1, 1) // uncompressed, one strip
         tag(262, 3, 1, 2) // RGB
@@ -45,7 +44,7 @@ internal object FloatTiff {
         tag(273, 4, 1, pixelOffset)
         tag(274, 3, 1, 1)
         tag(277, 3, 1, 3)
-        tag(278, 4, 1, bitmap.height)
+        tag(278, 4, 1, image.height)
         tag(279, 4, 1, pixelBytes.toInt())
         tag(284, 3, 1, 1) // interleaved samples
         tag(339, 3, 3, sampleOffset)
@@ -56,26 +55,15 @@ internal object FloatTiff {
         header.put(description)
         header.position(iccOffset); header.put(icc)
         output.write(header.array())
-        val pixels = ByteBuffer.allocate(bitmap.byteCount).order(ByteOrder.nativeOrder())
-        bitmap.copyPixelsToBuffer(pixels)
-        val row = ByteBuffer.allocate(bitmap.width * 12).order(ByteOrder.LITTLE_ENDIAN)
-        for (y in 0 until bitmap.height) {
+        val pixels = image.pixels().asFloatBuffer()
+        val row = ByteBuffer.allocate(image.width * 12).order(ByteOrder.LITTLE_ENDIAN)
+        for (y in 0 until image.height) {
             row.clear()
-            for (x in 0 until bitmap.width) for (c in 0..2) {
-                row.putFloat(half(pixels.getShort(y * bitmap.rowBytes + x * 8 + c * 2).toInt() and 0xffff))
+            for (x in 0 until image.width) for (c in 0..2) {
+                row.putFloat(pixels[(y * image.width + x) * 3 + c])
             }
             output.write(row.array())
         }
     }
 
-    private fun half(bits: Int): Float {
-        val sign = if (bits and 0x8000 == 0) 1f else -1f
-        val exponent = (bits ushr 10) and 31
-        val fraction = bits and 1023
-        return when (exponent) {
-            0 -> sign * Math.scalb(fraction.toFloat(), -24)
-            31 -> if (fraction == 0) sign * Float.POSITIVE_INFINITY else Float.NaN
-            else -> sign * Math.scalb((1024 + fraction).toFloat(), exponent - 25)
-        }
-    }
 }

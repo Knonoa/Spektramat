@@ -1,10 +1,9 @@
 package com.spektra.latent.data
 
-import android.graphics.Bitmap
-import android.graphics.ColorSpace
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.spektra.latent.engine.PhotoModel
+import com.spektra.latent.engine.FilmEngine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -17,15 +16,13 @@ import java.nio.ByteOrder
 class FloatTiffTest {
     @Test fun exportPreservesFloatSamplesAndEmbedsMatchingColorProfile() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        val bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.RGBA_F16, true,
-            ColorSpace.get(ColorSpace.Named.LINEAR_EXTENDED_SRGB))
-        val pixels = ByteBuffer.allocate(bitmap.byteCount).order(ByteOrder.nativeOrder())
-        pixels.putShort(0xb400.toShort()).putShort(0x3800).putShort(0x4000).putShort(0x3c00).rewind()
-        bitmap.copyPixelsFromBuffer(pixels)
-        try {
+        val samples = floatArrayOf(-.25001f, .50001f, 2.0001f)
             for (space in PhotoModel.outputColorSpaces) for (encoded in listOf(true, false)) {
                 val output = ByteArrayOutputStream()
-                FloatTiff.write(context, bitmap, PhotoModel(outputColorSpace = space, outputCctfEncoding = encoded), output)
+                FilmEngine.outputPixels(1, 1, samples,
+                    PhotoModel(outputColorSpace = space, outputCctfEncoding = encoded)).use {
+                    FloatTiff.write(context, it, output)
+                }
                 val bytes = output.toByteArray()
                 val data = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
                 assertEquals(42, data.getShort(2).toInt())
@@ -40,9 +37,7 @@ class FloatTiffTest {
                     error("Missing TIFF tag $tag")
                 }
                 val strip = field(273).second
-                assertEquals(-.25f, data.getFloat(strip), 0f)
-                assertEquals(.5f, data.getFloat(strip + 4), 0f)
-                assertEquals(2f, data.getFloat(strip + 8), 0f)
+                for (c in 0..2) assertEquals(samples[c].toRawBits(), data.getFloat(strip + c * 4).toRawBits())
                 val (size, offset) = field(34675)
                 val profile = ByteBuffer.wrap(bytes, offset, size).slice().order(ByteOrder.BIG_ENDIAN)
                 assertEquals(size, profile.getInt(0))
@@ -53,6 +48,5 @@ class FloatTiffTest {
                 assertTrue(text.contains(space))
                 assertEquals(!encoded, text.contains("(linear)"))
             }
-        } finally { bitmap.recycle() }
     }
 }

@@ -17,7 +17,9 @@ internal object Native {
     external fun probe(path: String): IntArray?
     external fun decodeFile(path: String, maxEdge: Int, lensShading: Boolean): Long
     external fun fromBitmap(bitmap: Bitmap): Long
+    external fun newFloatImage(width: Int, height: Int): Long
     external fun scaled(image: Long, maxEdge: Int): Long
+    external fun scaledPhoto(image: Long, maxEdge: Int, colorSpace: String, encoded: Boolean): Long
     external fun cropped(image: Long, x: Int, y: Int, w: Int, h: Int): Long
     external fun imageInfo(image: Long): IntArray
     external fun imagePixels(image: Long): ByteBuffer?
@@ -71,7 +73,8 @@ internal object Native {
         image: Long, grade: FloatArray, film: String, paper: String, scanFilm: Boolean,
         look: FloatArray, finish: FloatArray, finishTable: FloatArray,
         rebate: Array<String>?, rebateNumbers: FloatArray?, lane: Int,
-        seed: Long, out: Bitmap, listener: StageListener?, model: FloatArray, photoMode: Int, outputColorSpace: String,
+        seed: Long, out: Bitmap?, listener: StageListener?, model: FloatArray, photoMode: Int, outputColorSpace: String,
+        outputImage: Long,
     ): String?
 }
 

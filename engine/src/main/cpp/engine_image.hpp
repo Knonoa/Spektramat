@@ -4,13 +4,14 @@
 // validated dev snapshot used for Bitmap input: sRGB 8-bit -> linear). This
 // reader produces that buffer from a file the app can already address:
 //
-//   * JPEG / PNG / BMP / TGA via stb_image, 8 or 16 bits per sample,
-//     EXIF orientation applied once, treated as sRGB (stb carries no ICC).
-//     Ordinary TIFF is not implemented by stb; tracked as F05, not RAW support.
+//   * JPEG / PNG through stb's native 8/16-bit samples and Little CMS float ICC
+//     conversion; ordinary RGB/gray TIFF through LibTIFF scanlines/tiles at
+//     8/16-bit integer or 32-bit float precision. No F16/display surface is used.
+//     BMP / TGA use stb's 8/16-bit reader, assumed sRGB.
 //   * RAW through two developers, tried in a fixed order (decode_linear):
 //       1. the in-tree reader in raw_decode.cpp (uncompressed and SOF3 lossless
 //          TIFF/DNG): CFA-aware demosaic, camera matrix + as-shot white balance,
-//          highlight recovery;
+//          preserving unclipped float highlights and shadows;
 //       2. LibRaw (raw_libraw.cpp), only for what the in-tree reader reports as
 //          not implemented -- other containers (CR3, RAF, RW2, ORF, ...), packed
 //          bit depths, vendor compressions. A file the in-tree reader understands

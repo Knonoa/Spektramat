@@ -249,7 +249,7 @@ fun AppShell(
     val light = shell.forced ?: themed
     SideEffect { Ink.light = light }
     // a page that follows the theme takes it back at once
-    LaunchedEffect(current) { if (current == Screen.Library || current == Screen.Settings) shell.forced = null }
+    LaunchedEffect(current) { if (current == Screen.Library || current == Screen.Settings || current == Screen.Updates) shell.forced = null }
     DisposableEffect(light) {
         val window = context.activity()?.window
         val bars = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
@@ -580,7 +580,7 @@ private fun SidePlate(shell: Shell, places: List<Place>, current: Screen, onPlac
                 ) {
                     places.forEachIndexed { i, place ->
                         val on = i == at
-                        if (i == places.lastIndex) Spacer(Modifier.height(if (compact) 8.dp else if (rest > 24.dp) rest else 24.dp))
+                        if (place.screen == Screen.Settings) Spacer(Modifier.height(if (compact) 8.dp else if (rest > 24.dp) rest else 24.dp))
                         Row(
                             Modifier
                                 .fillMaxWidth()

@@ -71,6 +71,40 @@ class LinearImage internal constructor(internal val id: Long) : AutoCloseable {
     }
 }
 
+/** Full precision finished pixels in the requested output space and encoding.
+ * This buffer never passes through Android's F16 or 8-bit display surfaces. */
+class PhotoPixels internal constructor(private val image: LinearImage, val model: PhotoModel) : AutoCloseable {
+    val width: Int get() = image.width
+    val height: Int get() = image.height
+    fun pixels(): ByteBuffer = image.pixels()
+    fun scaled(maxEdge: Int): PhotoPixels = PhotoPixels(
+        LinearImage(Native.scaledPhoto(image.id, maxEdge, model.outputColorSpace, model.outputCctfEncoding)), model)
+
+    /** A colour-managed display/share copy, never a source for float export. */
+    fun display(maxEdge: Int = 1600): Bitmap {
+        if (maxEdge > 0 && maxOf(width, height) > maxEdge) return scaled(maxEdge).use { it.display(0) }
+        val encodedSpace = ColorSpace.get(when (model.outputColorSpace) {
+            "Display P3" -> ColorSpace.Named.DISPLAY_P3
+            "Adobe RGB (1998)" -> ColorSpace.Named.ADOBE_RGB
+            "ProPhoto RGB" -> ColorSpace.Named.PRO_PHOTO_RGB
+            else -> ColorSpace.Named.SRGB
+        }) as ColorSpace.Rgb
+        val sourceSpace = if (model.outputCctfEncoding) encodedSpace else
+            ColorSpace.Rgb("Linear ${model.outputColorSpace}", encodedSpace.primaries, encodedSpace.whitePoint,
+                ColorSpace.Rgb.TransferParameters(1.0, 0.0, 1.0, 0.0, 1.0))
+        val connector = ColorSpace.connect(sourceSpace, ColorSpace.get(ColorSpace.Named.SRGB))
+        val source = pixels().asFloatBuffer()
+        val argb = IntArray(width * height)
+        for (i in argb.indices) {
+            val rgb = connector.transform(source[i * 3], source[i * 3 + 1], source[i * 3 + 2])
+            fun code(v: Float) = (v.coerceIn(0f, 1f) * 255f + .5f).toInt()
+            argb[i] = (255 shl 24) or (code(rgb[0]) shl 16) or (code(rgb[1]) shl 8) or code(rgb[2])
+        }
+        return Bitmap.createBitmap(argb, width, height, Bitmap.Config.ARGB_8888)
+    }
+    override fun close() = image.close()
+}
+
 /**
  * The film model as tables for the GPU (lt_tables.hpp). One instance follows one
  * look around: [bake] refreshes only the groups whose inputs changed and the
@@ -257,7 +291,7 @@ object FilmEngine {
         private set
 
     /** Changes whenever the pipeline contract or its spectral data changes. */
-    var renderCacheKey: String = "exact-v2"
+    var renderCacheKey: String = "exact-v4-float-photo"
         private set
 
     private var assetsChecked = false
@@ -284,7 +318,7 @@ object FilmEngine {
                 }
                 val actual = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
                 if (actual != expected) return "Spectral asset checksum mismatch"
-                renderCacheKey = "exact-v2-${actual.take(12)}"
+                renderCacheKey = "exact-v4-float-photo-${actual.take(12)}"
                 assetsChecked = true
             } catch (e: Exception) {
                 return "Cannot validate spectral assets: ${e.message}"
@@ -314,12 +348,12 @@ object FilmEngine {
 
     fun isRaw(path: String): Boolean = Native.isRaw(path)
 
-    /** Width and height of a RAW as it will be developed (oriented), or null when the engine cannot read it. */
+    /** Oriented dimensions of a supported original, or null when the engine cannot read it. */
     fun probe(path: String): IntArray? = Native.probe(path)
 
     /**
-     * Develops a file the engine reads itself (RAW; also JPEG/PNG without colour
-     * management). [maxEdge] 0 keeps the native size.
+     * Develops a supported original directly into colour-managed float32 RGB.
+     * [maxEdge] 0 keeps the native size; a positive value is only for proxies.
      * @throws IOException with the decoder's reason
      */
     fun decode(path: String, maxEdge: Int, lensShading: Boolean = true): LinearImage =
@@ -327,6 +361,46 @@ object FilmEngine {
 
     /** An sRGB ARGB_8888 or extended linear-sRGB RGBA_F16 bitmap as a scene-linear picture. */
     fun fromBitmap(bitmap: Bitmap): LinearImage = LinearImage(Native.fromBitmap(bitmap))
+
+    /** Preserve each source 8-bit code before float32 ICC conversion. */
+    fun fromEncodedBitmap(bitmap: Bitmap): LinearImage {
+        require(bitmap.config == Bitmap.Config.ARGB_8888) { "Expected an 8-bit encoded source" }
+        val space = bitmap.colorSpace ?: ColorSpace.get(ColorSpace.Named.SRGB)
+        val converter = ColorSpace.connect(space, ColorSpace.get(ColorSpace.Named.LINEAR_EXTENDED_SRGB))
+        val codes = ByteBuffer.allocate(bitmap.byteCount)
+        bitmap.copyPixelsToBuffer(codes)
+        val image = LinearImage(Native.newFloatImage(bitmap.width, bitmap.height))
+        try {
+            val output = image.pixels().asFloatBuffer()
+            for (y in 0 until bitmap.height) for (x in 0 until bitmap.width) {
+                val at = y * bitmap.rowBytes + x * 4
+                val alpha = (codes[at + 3].toInt() and 255) / 255f
+                fun channel(c: Int) = if (bitmap.isPremultiplied && alpha > 0f)
+                    (codes[at + c].toInt() and 255) / (255f * alpha)
+                else (codes[at + c].toInt() and 255) / 255f
+                val rgb = converter.transform(channel(0), channel(1), channel(2))
+                output.put(rgb)
+            }
+            return image
+        } catch (failure: Throwable) { image.close(); throw failure }
+    }
+
+    /** Copy extended linear RGB float32 values without clipping or an intermediate bitmap. */
+    fun fromLinearRgb(width: Int, height: Int, rgb: FloatArray): LinearImage {
+        require(width > 0 && height > 0 && rgb.size.toLong() == width.toLong() * height * 3)
+        require(rgb.all { it.isFinite() })
+        val image = LinearImage(Native.newFloatImage(width, height))
+        try {
+            image.pixels().asFloatBuffer().put(rgb)
+            return image
+        } catch (failure: Throwable) { image.close(); throw failure }
+    }
+
+    /** Owns a copy of already finished float32 samples, tagged with their output colour space. */
+    fun outputPixels(width: Int, height: Int, rgb: FloatArray, model: PhotoModel): PhotoPixels {
+        require(model.outputColorSpace in PhotoModel.outputColorSpaces)
+        return PhotoPixels(fromLinearRgb(width, height, rgb), model)
+    }
 
     /** White-balance gains (r, g, b) for temperature and tint in -100..100; grey keeps its luminance. */
     fun whiteBalance(temperature: Float, tint: Float): FloatArray = Native.wbGains(temperature, tint)
@@ -383,8 +457,8 @@ object FilmEngine {
         val numbers = if (idle) null else order.rebate.numbers()
         val size = developSize(image.width, image.height, order.rebate)
         require(order.model.outputColorSpace in PhotoModel.outputColorSpaces)
-        // Android's colour-managed bitmap can represent every supported space
-        // in float; ordinary sRGB previews keep their compact 8-bit surface.
+        // These are display surfaces only. Final export uses developFloat,
+        // avoiding both Android F16 and 8-bit intermediates.
         val cs = when (order.model.outputColorSpace) {
             "Display P3" -> ColorSpace.Named.DISPLAY_P3
             "Adobe RGB (1998)" -> ColorSpace.Named.ADOBE_RGB
@@ -407,12 +481,38 @@ object FilmEngine {
             image.id, grade, order.film, order.paper, order.scanFilm, order.floats(), finish, finishTable,
             strings, numbers, lane, order.seed, out, listener, order.model.floats(), mode.nativeValue,
             order.model.outputColorSpace,
+            0L,
         )
         if (error != null) {
             out.recycle()
             throw if (error == "cancelled") DevelopCancelled() else IOException(error)
         }
         return out
+    }
+
+    /** Render from the decoded original straight into float32 export pixels. */
+    fun developFloat(
+        image: LinearImage, grade: FloatArray, order: PrintOrder, finish: FloatArray, finishTable: FloatArray,
+        listener: StageListener? = null,
+    ): PhotoPixels {
+        require(!image.previewOnly) { "无法完整解码此 RAW，不能使用内嵌预览图导出" }
+        require(order.model.outputColorSpace in PhotoModel.outputColorSpaces)
+        val size = developSize(image.width, image.height, order.rebate)
+        val out = LinearImage(Native.newFloatImage(size[0], size[1]))
+        try {
+            val idle = order.rebate.idle
+            val error = Native.develop(
+                image.id, grade, order.film, order.paper, order.scanFilm, order.floats(), finish, finishTable,
+                if (idle) null else order.rebate.strings(), if (idle) null else order.rebate.numbers(),
+                PRINT, order.seed, null, listener, order.model.floats(), PhotoRenderMode.PHOTO_FULL.nativeValue,
+                order.model.outputColorSpace, out.id,
+            )
+            if (error != null) throw if (error == "cancelled") DevelopCancelled() else IOException(error)
+            return PhotoPixels(out, order.model)
+        } catch (failure: Throwable) {
+            out.close()
+            throw failure
+        }
     }
 
     /**

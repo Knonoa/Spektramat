@@ -113,8 +113,8 @@ struct RenderParams {
     bool auto_exposure = true;
     std::string auto_exposure_method = "center_weighted";
     // Video and legacy pregraded callers apply exposure before entering the
-    // engine. Photos leave this false so reference metering and manual EV
-    // operate on the current scene once, before film exposure.
+    // engine. Photos leave this false so manual EV is applied once before
+    // film exposure; auto_exposure independently controls scene metering.
     bool exposure_preapplied = false;
     float film_format_mm = 35.0f;         // camera.film_format_mm (long edge)
     float camera_lens_blur_um = 0.0f;

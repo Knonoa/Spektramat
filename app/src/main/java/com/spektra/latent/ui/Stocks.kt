@@ -161,7 +161,7 @@ private fun StockSample(stock: Stock, film: Boolean, frame: Frame, look: Look, m
                     Decoder.decode(frame.file, 180, candidate.lensShading, candidate.aspect).use { source ->
                         val bitmap = FilmEngine.develop(
                             source, candidate.photoGrade(),
-                            candidate.order(frame.id * 7919L + 1L, Shooting.of(frame), Library.frameSeed(frame), frame.number),
+                            candidate.photoOrder(frame.id * 7919L + 1L, Shooting.of(frame), Library.frameSeed(frame), frame.number),
                             candidate.finish(), candidate.finishTable(), lane = FilmEngine.THUMB,
                         )
                         try {

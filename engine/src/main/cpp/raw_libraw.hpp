@@ -7,10 +7,12 @@
 // reader (raw_decode.cpp) reports as not implemented; what that reader develops
 // today keeps developing the same way, pixel for pixel.
 //
-// Output contract is identical to the rest of the engine: scene-linear sRGB
-// float, top row first, EXIF orientation already applied, sensor white at 1.0.
-// Highlights are clipped to neutral white (no soft knee as in the in-tree
-// reader), and a file whose sensor data LibRaw reports as corrupt is refused.
+// LibRaw owns unpacking/container support. Its ushort dcraw postprocessing is
+// deliberately bypassed: black subtraction, MHC demosaic, lens gains, as-shot
+// white balance and the camera matrix run in float32. Scene-linear sRGB output
+// retains negative/above-white samples, top row first with EXIF orientation
+// applied. Unsupported sensor layouts are refused instead of being silently
+// quantized; corrupt sensor data is also refused.
 #pragma once
 
 #include <string>

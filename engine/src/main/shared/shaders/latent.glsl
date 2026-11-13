@@ -121,7 +121,9 @@ vec3 grade_scene(vec3 rgb, Grade g) {
     float colourful = clamp((hi - lo) / max(hi, 1.0e-6), 0.0, 1.0);
     float k = g.saturation * (1.0 + g.vibrance * (1.0 - colourful));
     c = vec3(y) + (c - vec3(y)) * k;
-    return max(c, vec3(0.0));
+    // Matrix-converted colours may contain negative channels. Keep them until
+    // the physical film response / final display boundary, including after EV.
+    return c;
 }
 
 // ---------------------------------------------------------------- film
@@ -231,6 +233,27 @@ vec3 lt_linear3(vec3 c) {
     return vec3(lt_linear(c.x), lt_linear(c.y), lt_linear(c.z));
 }
 
+// Arithmetic transfer functions preserve extended values. The bounded variants
+// above are exclusively for final SDR display encoding.
+float lt_srgb_extended(float v) {
+    if (v <= 0.0031308) { return v * 12.92; }
+    return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+float lt_linear_extended(float v) {
+    if (v <= 0.04045) { return v / 12.92; }
+    return pow((v + 0.055) / 1.055, 2.4);
+}
+vec3 lt_encode_extended(vec3 c) {
+    return vec3(lt_srgb_extended(c.x), lt_srgb_extended(c.y), lt_srgb_extended(c.z));
+}
+vec3 lt_decode_extended(vec3 c) {
+    return vec3(lt_linear_extended(c.x), lt_linear_extended(c.y), lt_linear_extended(c.z));
+}
+float lt_cbrt(float v) {
+    if (v < 0.0) { return -pow(-v, 1.0 / 3.0); }
+    return pow(v, 1.0 / 3.0);
+}
+
 // ---------------------------------------------------------------- finishing
 //
 // What is done to the print itself, after the film and the paper have made it:
@@ -254,9 +277,9 @@ struct Finish {
 
 // Oklab (Ottosson 2020): lightness, and two colour axes on which equal steps look equal.
 vec3 lt_oklab(vec3 c) {
-    float l = pow(max(0.4122214708 * c.x + 0.5363325363 * c.y + 0.0514459929 * c.z, 0.0), 1.0 / 3.0);
-    float m = pow(max(0.2119034982 * c.x + 0.6806995451 * c.y + 0.1073969566 * c.z, 0.0), 1.0 / 3.0);
-    float s = pow(max(0.0883024619 * c.x + 0.2817188376 * c.y + 0.6299787005 * c.z, 0.0), 1.0 / 3.0);
+    float l = lt_cbrt(0.4122214708 * c.x + 0.5363325363 * c.y + 0.0514459929 * c.z);
+    float m = lt_cbrt(0.2119034982 * c.x + 0.6806995451 * c.y + 0.1073969566 * c.z);
+    float s = lt_cbrt(0.0883024619 * c.x + 0.2817188376 * c.y + 0.6299787005 * c.z);
     return vec3(
         0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
         1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
@@ -279,7 +302,7 @@ vec3 lt_oklab_inverse(vec3 lab) {
 // The tone curve: drawn on the picture as it is seen (sRGB-encoded), each
 // channel through its own curve.
 vec3 finish_tone(vec3 rgb) {
-    return lt_linear3(tex_curve(lt_srgb3(rgb)));
+    return lt_decode_extended(tex_curve(lt_encode_extended(rgb)));
 }
 
 // The colour mixer: a colour is moved according to its hue -- turned, made
@@ -305,7 +328,7 @@ vec3 finish_mixer(vec3 rgb) {
 // Colour grading: a tint and a lightness for shadows, midtones and highlights.
 // The three ranges always add up to one, so a tone is never tinted twice over.
 vec3 finish_grade(vec3 rgb, Finish f) {
-    vec3 e = lt_srgb3(rgb);
+    vec3 e = lt_encode_extended(rgb);
     float y = lt_luma(e);
     float width = 0.12 + 0.6 * f.blending;
     float pivot = 0.5 + 0.3 * f.balance;
@@ -316,7 +339,7 @@ vec3 finish_grade(vec3 rgb, Finish f) {
     float wh = hi * hi;
     e = e + f.tint_s * ws + f.tint_m * wm + f.tint_h * wh;
     e = e + vec3(f.lift.x * ws + f.lift.y * wm + f.lift.z * wh);
-    return lt_linear3(e);
+    return lt_decode_extended(e);
 }
 
 // Darker or lighter corners, in stops, as light falls off in a lens.
@@ -328,14 +351,14 @@ vec3 finish_vignette(vec3 rgb, vec2 pos, Finish f) {
 }
 
 // The finished picture. With every flag 0 and no vignette it comes back unchanged
-// (apart from negative values, which no picture has).
+// including negative / above-white channels from colour conversion.
 vec3 finish_all(vec3 rgb, vec2 pos, Finish f) {
-    vec3 c = max(rgb, vec3(0.0));
+    vec3 c = rgb;
     if (f.curve > 0.5) {
         c = finish_tone(c);
     }
     if (f.mixer > 0.5) {
-        c = max(finish_mixer(c), vec3(0.0));
+        c = finish_mixer(c);
     }
     if (f.grading > 0.5) {
         c = finish_grade(c, f);

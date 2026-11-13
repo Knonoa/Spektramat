@@ -77,7 +77,7 @@ class DarkroomProofTest {
             Decoder.decode(file, DarkroomState.PREVIEW_EDGE, look.lensShading, look.aspect).use { decoded ->
                 decoded.scaled(DarkroomState.PROOF_EDGE).use { source ->
                     val expected = FilmEngine.develop(source, finalLook.photoGrade(),
-                        finalLook.order(seed = frame.id * 7919L + 1L), finalLook.finish(), finalLook.finishTable(),
+                        finalLook.photoOrder(seed = frame.id * 7919L + 1L), finalLook.finish(), finalLook.finishTable(),
                         lane = FilmEngine.THUMB)
                     try {
                         val a = IntArray(actual.width * actual.height)
@@ -140,7 +140,7 @@ class DarkroomProofTest {
                         actual = state.proof!!.asAndroidBitmap()
                     }
                     val restoredFilm = FilmEngine.develop(source, finalLook.photoGrade(),
-                        finalLook.order(seed = frame.id * 7919L + 1L), finalLook.finish(), finalLook.finishTable(),
+                        finalLook.photoOrder(seed = frame.id * 7919L + 1L), finalLook.finish(), finalLook.finishTable(),
                         lane = FilmEngine.THUMB)
                     try {
                         assertEquals(restoredFilm.width, actual.width)

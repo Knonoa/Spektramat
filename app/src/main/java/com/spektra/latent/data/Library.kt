@@ -47,7 +47,7 @@ data class Frame(
     val shutter: Double,
     val aperture: Double,
     val focal: Double,
-    /** Import-time metering metadata. Full photo renders meter their current input independently. */
+    /** Legacy capture/import metering metadata; never applied to saved-photo rendering. */
     val meteredEv: Float,
     val look: Look,
     /** The thumbnail on disk shows the look as of this revision. */
@@ -116,8 +116,8 @@ class Library(context: Context) {
     /** Rebuild old-algorithm previews after the catalogue is available. */
     suspend fun refreshPreviews() = withContext(Dispatchers.IO) {
         catalogue.withLock {
-            // Cached previews produced by the old LUT engine cannot stand in for
-            // exact photo results after an algorithm/data update.
+            // Old previews cannot stand in for results after a pipeline/data
+            // update, including changes to the saved-photo exposure policy.
             for (frame in _rolls.value.flatMap { it.frames }) {
                 if (frame.thumb.exists()) continue
                 try {
@@ -187,13 +187,11 @@ class Library(context: Context) {
                             val look = Look()
                             val preview = thumbFile(original, 1)
                             thumb = preview
-                            val metered = Decoder.decode(original, THUMB_EDGE, look.lensShading).use { small ->
-                                val ev = small.meterEv()
+                            Decoder.decode(original, THUMB_EDGE, look.lensShading).use { small ->
                                 renderThumb(small, look, preview)
-                                ev
                             }
                             val destination = rollId ?: dailyRoll(day).also { rollId = it }
-                            added += insertFrame(destination, original, name, size, metered, look)
+                            added += insertFrame(destination, original, name, size, 0f, look)
                             registered = true
                         } catch (e: Exception) {
                             Journal.w(TAG, "import failed: $name", e)
@@ -220,9 +218,8 @@ class Library(context: Context) {
      * is the app's own temporary file) and filed on today's camera roll with
      * the look of the film that was in the camera.
      *
-     * [metered] is capture metadata: 0 for an already exposed JPEG, or null to
-     * measure the source. Rendering applies the recipe's reference metering
-     * to the current input rather than multiplying this stored measurement.
+     * [metered] is optional legacy capture metadata. The saved image keeps
+     * its existing exposure; neither import nor rendering meters it again.
      */
     suspend fun addCapture(
         shot: File, name: String, look: Look, metered: Float?, roll: Long? = null, keepOnFailure: Boolean = false,
@@ -239,8 +236,7 @@ class Library(context: Context) {
                     shot.delete()
                 }
                 val size = Decoder.size(copy) ?: throw IOException("拍下的文件读不出来")
-                // Keep source metering as metadata, independently of the recipe's render metering.
-                val ev = metered ?: Decoder.decode(copy, THUMB_EDGE, look.lensShading).use { it.meterEv() }
+                val ev = metered ?: 0f
                 val id = insertFrame(destination ?: cameraRoll(), copy, name, size, ev, look)
                 registered = true
                 publish()
@@ -432,7 +428,7 @@ class Library(context: Context) {
 
     /** Every photo surface, including thumbnails, uses the full spectral engine. */
     private fun picture(small: LinearImage, look: Look, rebate: Rebate): Bitmap {
-        val base = look.order(seed = 1L)
+        val base = look.photoOrder(seed = 1L)
         val order = if (rebate.idle) base else base.copy(rebate = rebate)
         return FilmEngine.develop(small, look.photoGrade(), order, look.finish(), look.finishTable(), lane = FilmEngine.THUMB)
     }
@@ -662,7 +658,7 @@ class Library(context: Context) {
 
     companion object {
         private const val TAG = "latent-library"
-        /** Long edge of thumbnails and of the picture metering is taken from. */
+        /** Long edge of saved-photo thumbnails. */
         const val THUMB_EDGE = 640
         /** Long edge of the larger copies the light table shows. */
         const val PROXY_EDGE = 1600

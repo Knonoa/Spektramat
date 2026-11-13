@@ -228,7 +228,7 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onOpen: 
     // a print of every photograph as soon as it is filed, when the person has asked for that
     DisposableEffect(rig) {
         rig.onFiled = { frame ->
-            if (rig.printOnRelease) prints.order(frame, frame.look, context.getSharedPreferences("appearance", 0).getInt("exportEdge", 3072))
+            if (rig.printOnRelease) prints.order(frame, frame.look, context.getSharedPreferences("appearance", 0).getInt("exportEdge", 0))
         }
         onDispose { rig.onFiled = null }
     }

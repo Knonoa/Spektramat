@@ -3,4 +3,5 @@
     <files-path name="prints" path="prints/" />
     <!-- where the system camera is asked to write, and where exports wait to be shared -->
     <cache-path name="handover" path="handover/" />
+    <cache-path name="updates" path="updates/" />
 </paths>

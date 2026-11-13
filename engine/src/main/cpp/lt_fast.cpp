@@ -74,8 +74,10 @@ struct Shared {
         const float uu[3] = {u.x, u.y, u.z};
         float out[3];
         for (int c = 0; c < 3; c++) {
-            const float x = clamp(uu[c], 0.0f, 1.0f) * (float)(n - 1);
-            const int i = std::min((int)x, n - 2);
+            // Extend the endpoint segment; sampling the table must not flatten
+            // extended source values to black or white before output encoding.
+            const float x = uu[c] * (float)(n - 1);
+            const int i = x <= 0 ? 0 : x >= n - 1 ? n - 2 : (int)x;
             const float f = x - (float)i;
             const float a = finish_table[(size_t)i * 3 + c], b = finish_table[(size_t)(i + 1) * 3 + c];
             out[c] = a + (b - a) * f;

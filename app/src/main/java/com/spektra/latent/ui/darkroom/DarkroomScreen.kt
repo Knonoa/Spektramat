@@ -348,7 +348,8 @@ fun Darkroom(
 
     // ---- ordering a print
     val native = state.look.frameSize(frame.width, frame.height).max()
-    val wanted = prefs.getInt("exportEdge", 3072).coerceAtMost(native)
+    val requested = prefs.getInt("exportEdge", 0)
+    val wanted = if (requested <= 0) native else requested.coerceAtMost(native)
     val sizes = remember(native, wanted) { (listOf(2048, 3072, 4096).filter { it < native } + wanted + native).distinct().sorted() }
     var edge by remember(frame.id, wanted) { mutableStateOf(wanted) }
     var format by remember { mutableStateOf(PrintFormat.AUTO) }

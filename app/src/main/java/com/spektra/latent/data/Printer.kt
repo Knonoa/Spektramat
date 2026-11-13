@@ -3,8 +3,6 @@ package com.spektra.latent.data
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.ColorSpace
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -15,6 +13,7 @@ import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import com.spektra.latent.engine.DevelopCancelled
 import com.spektra.latent.engine.FilmEngine
+import com.spektra.latent.engine.PhotoPixels
 import com.spektra.latent.engine.StageListener
 import com.spektra.latent.model.Look
 import com.spektra.latent.model.Shooting
@@ -22,7 +21,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
-import kotlin.math.max
 import kotlin.math.roundToInt
 
 /** A finished print: where it was saved, and a screen-sized copy to show. */
@@ -30,9 +28,9 @@ class Printed(val uri: Uri, val width: Int, val height: Int, val shown: Bitmap)
 
 /**
  * Makes the finished print of a frame: the original is read again at the
- * ordered size, corrected with the look's grade, sent through the full engine,
- * and saved in the phone's gallery. sRGB encoded prints use JPEG; wide-gamut
- * and linear prints keep their float samples and ICC in TIFF.
+ * native size, corrected with the look's grade and sent through the full engine.
+ * Only the finished float32 pixels are resized to the requested output size.
+ * TIFF preserves these samples; JPEG is an explicit 8-bit sharing conversion.
  *
  * The stages reported while it works are real ones:
  * 0 reading the original, 1 film exposed, 2 film developed, 3 printed,
@@ -53,48 +51,44 @@ object Printer {
         onStage: (Int) -> Unit,
     ): Printed = withContext(Dispatchers.IO) {
         onStage(0)
-        val edge = if (longEdge >= look.frameSize(frame.width, frame.height).max()) 0 else longEdge
         val shooting = if (look.edge.on || look.date.on) Shooting.of(frame) else null
-        val outputModel = look.model
-        val print: Bitmap = Decoder.decode(frame.file, edge, look.lensShading, look.aspect).use { original ->
+        val nativeFrameEdge = look.frameSize(frame.width, frame.height).max()
+        val print = Decoder.decode(frame.file, 0, look.lensShading, look.aspect).use { original ->
             if (shouldStop()) throw DevelopCancelled()
             // the engine's grain and halation are sized on the film: the same frame, whatever the print's size
-            FilmEngine.develop(
+            FilmEngine.developFloat(
                 original, look.photoGrade(),
-                look.order(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number)
-                    .copy(model = outputModel),
+                look.photoOrder(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number),
                 look.finish(), look.finishTable(),
                 object : StageListener {
                     override fun onStage(stage: Int) = onStage(stage)
                 },
-                highPrecision = format == PrintFormat.FLOAT_TIFF,
             )
         }
         try {
             // Cancellation can arrive during decoding, before the native
             // engine resets its cancellation flag, or just after rendering.
             if (shouldStop()) throw DevelopCancelled()
-            val floating = format != PrintFormat.JPEG && print.config == Bitmap.Config.RGBA_F16
-            val name = fileName(frame, look, floating)
-            val uri = save(context, print, name, outputModel, floating)
-            // ExifInterface does not support rewriting this float TIFF.
-            if (!floating) copyExif(context, frame.file, uri)
-            library.addPrint(frame.id, uri.toString(), print.width, print.height, look.film)
-            onStage(STAGES)
-            val k = min1(1600f / max(print.width, print.height))
-            val shown = Bitmap.createBitmap(max(1, (print.width * k).roundToInt()),
-                max(1, (print.height * k).roundToInt()), Bitmap.Config.ARGB_8888)
-            Canvas(shown).drawBitmap(print, null, android.graphics.Rect(0, 0, shown.width, shown.height),
-                android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
-            Printed(uri, print.width, print.height, shown)
+            val target = if (longEdge in 1 until nativeFrameEdge)
+                (maxOf(print.width, print.height).toDouble() * longEdge / nativeFrameEdge).roundToInt().coerceAtLeast(1)
+            else 0
+            val resized = if (target > 0) print.scaled(target) else null
+            try {
+                val output = resized ?: print
+                val floating = format != PrintFormat.JPEG
+                val name = fileName(frame, look, floating)
+                val uri = save(context, output, name, floating)
+                if (!floating) copyExif(context, frame.file, uri)
+                library.addPrint(frame.id, uri.toString(), output.width, output.height, look.film)
+                onStage(STAGES)
+                Printed(uri, output.width, output.height, output.display())
+            } finally { resized?.close() }
         } finally {
-            print.recycle()
+            print.close()
         }
     }
 
     fun cancel() = FilmEngine.cancelDevelop()
-
-    private fun min1(v: Float) = if (v < 1f) v else 1f
 
     private fun fileName(frame: Frame, look: Look, floating: Boolean): String {
         val base = frame.name.substringBeforeLast('.').ifBlank { "frame-${frame.number}" }
@@ -104,21 +98,14 @@ object Printer {
         return "${base}_${film}_$stamp.$extension".replace(Regex("[^\\w.\\-\\u4e00-\\u9fff]"), "_")
     }
 
-    private fun save(context: Context, bitmap: Bitmap, name: String,
-                     model: com.spektra.latent.engine.PhotoModel, floating: Boolean): Uri {
+    private fun save(context: Context, pixels: PhotoPixels, name: String, floating: Boolean): Uri {
         fun encode(output: java.io.OutputStream) {
-            if (floating) FloatTiff.write(context, bitmap, model, output)
+            if (floating) FloatTiff.write(context, pixels, output)
             else {
-                // An explicitly requested JPEG always has sRGB samples,
-                // including when the look renders to a wide/linear bitmap.
-                val srgb = if (bitmap.config == Bitmap.Config.ARGB_8888 &&
-                    bitmap.colorSpace == ColorSpace.get(ColorSpace.Named.SRGB)) bitmap else
-                    Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888).also {
-                        Canvas(it).drawBitmap(bitmap, 0f, 0f, null)
-                    }
+                val srgb = pixels.display(0)
                 try {
                     if (!srgb.compress(Bitmap.CompressFormat.JPEG, 95, output)) throw IOException("成片编码失败")
-                } finally { if (srgb !== bitmap) srgb.recycle() }
+                } finally { srgb.recycle() }
             }
         }
         if (Build.VERSION.SDK_INT >= 29) {

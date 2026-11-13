@@ -860,8 +860,8 @@ struct Engine::Impl {
         // the canvas exists (RFC-032 §27)
         const double ae = (p.auto_exposure && !p.exposure_preapplied) ? auto_exposure_ev(rgb, fw, fh, p.auto_exposure_method) : 0.0;
         const double gain = std::pow(2.0, ae);
-        // Photos meter the current scene and apply manual camera EV here.
-        // Explicit pregraded callers can bypass both gains; their manual EV
+        // Scene metering is optional; saved-photo callers disable it while
+        // manual EV is still applied here. Pregraded callers bypass both gains; their manual EV
         // remains available to the independent print normalization step.
         const double comp = p.exposure_preapplied ? 1.0 : std::pow(2.0, (double)p.exposure_ev);
         std::vector<float> frame_planes[3];

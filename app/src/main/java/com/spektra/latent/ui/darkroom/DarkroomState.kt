@@ -352,7 +352,7 @@ class DarkroomState(
                 if (want.adjustmentsOnly) FilmEngine.adjustPhoto(copy, l.grade(0f), l.finish(), l.finishTable())
                 else FilmEngine.develop(
                     copy, l.photoGrade(),
-                    l.order(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number),
+                    l.photoOrder(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number),
                     l.finish(), l.finishTable(), lane = FilmEngine.PROOF,
                 )
             }

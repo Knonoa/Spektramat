@@ -133,7 +133,7 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
         } catch (e: CancellationException) {
             throw e
         } catch (e: OutOfMemoryError) {
-            job.state = PrintJob.State.Failed("内存不够冲印这个尺寸，换一个小一些的尺寸再试。")
+            job.state = PrintJob.State.Failed("内存不足，无法完成原片渲染；请释放内存后重试。")
         } catch (e: Exception) {
             job.state = PrintJob.State.Failed(e.message ?: "冲印没有完成")
         }
@@ -142,7 +142,7 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
     private suspend fun bigPixels(frame: Frame, look: Look): Pair<IntArray, IntArray> = withContext(Dispatchers.IO) {
         Decoder.decode(frame.file, 96, look.lensShading, look.aspect).use { small ->
             val original = FilmEngine.display(small)
-            val order = look.order(seed = frame.id * 7919L + 1L, shooting = Shooting.of(frame),
+            val order = look.photoOrder(seed = frame.id * 7919L + 1L, shooting = Shooting.of(frame),
                 frameSeed = Library.frameSeed(frame), number = frame.number)
             val film = FilmEngine.develop(small, look.photoGrade(), order,
                 look.finish(), look.finishTable(), lane = FilmEngine.THUMB)

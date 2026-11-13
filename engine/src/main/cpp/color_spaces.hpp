@@ -1,5 +1,5 @@
 // Output colour spaces follow colour-science's RGB_COLOURSPACES definitions.
-// Input pixels remain extended scene-linear sRGB after Android ICC conversion.
+// Input pixels remain extended scene-linear sRGB after float32 ICC conversion.
 #pragma once
 
 #include <array>
@@ -69,6 +69,12 @@ inline float output_encode(float v, const std::string& name) {
     if (name == "Adobe RGB (1998)") return std::copysign(std::pow(std::fabs(v), 256.0f / 563.0f), v);
     if (name == "ProPhoto RGB") return v < std::pow(16.0f, -2.25f) ? v * 16 : std::pow(v, 1.0f / 1.8f);
     return v <= .0031308f ? 12.92f * v : 1.055f * std::pow(v, 1.0f / 2.4f) - .055f;
+}
+
+inline float output_decode(float v, const std::string& name) {
+    if (name == "Adobe RGB (1998)") return std::copysign(std::pow(std::fabs(v), 563.0f / 256.0f), v);
+    if (name == "ProPhoto RGB") return v < .03125f ? v / 16 : std::pow(v, 1.8f);
+    return v <= .04045f ? v / 12.92f : std::pow((v + .055f) / 1.055f, 2.4f);
 }
 
 }  // namespace spk

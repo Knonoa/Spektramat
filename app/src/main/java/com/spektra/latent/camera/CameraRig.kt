@@ -681,7 +681,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val name = "IMG_$stamp" + if (asRaw) ".dng" else ".jpg"
         val file = File(app.cacheDir, "shot-${System.nanoTime()}" + if (asRaw) ".dng" else ".jpg")
-        // Keep the camera original. Reference photo metering runs when rendering it.
+        // Keep the camera original and its exposure; saved-photo rendering does not re-meter it.
         // For RAW, carry the camera compensation into the recipe's manual film EV as well.
         val compensation = ev * (facts?.evStep ?: 0f)
         val shotLook = if (asRaw) look.copy(exposure = compensation) else look

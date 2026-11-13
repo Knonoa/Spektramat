@@ -2,7 +2,6 @@ package com.spektra.latent.data
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.ColorSpace
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.os.Build
@@ -14,21 +13,14 @@ import com.spektra.latent.model.Aspects
 import java.io.IOException
 import kotlin.math.ceil
 import kotlin.math.max
-import kotlin.math.roundToInt
 
-/**
- * A file in the library -> a scene-linear picture.
- *
- * RAW goes to the engine, which develops it from the sensor data. Everything
- * else (JPEG, HEIF, PNG, WebP) is decoded by Android, which converts the
- * file's own ICC profile to extended linear sRGB without an 8-bit intermediate,
- * and applies its orientation. The two routes never mix: a RAW is not shown through its
- * embedded JPEG unless the engine itself says that is all it could read.
- */
+/** Original files decode into float32 linear RGB. Native readers preserve RAW,
+ * JPEG / PNG and TIFF precision and profiles; platform 8-bit formats are
+ * colour-converted before proxy scaling. No display bitmap feeds export. */
 object Decoder {
     /** Oriented width and height, or null when the file is no picture this app reads. */
     fun size(file: File): IntArray? {
-        if (FilmEngine.isRaw(file.path)) return FilmEngine.probe(file.path)
+        if (kind(file) == 1 || FilmEngine.isRaw(file.path)) return FilmEngine.probe(file.path)
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.path, o)
         if (o.outWidth <= 0 || o.outHeight <= 0) return null
@@ -61,82 +53,66 @@ object Decoder {
      */
     fun decode(file: File, maxEdge: Int, lensShading: Boolean = true): LinearImage {
         if (FilmEngine.isRaw(file.path)) return FilmEngine.decode(file.path, maxEdge, lensShading)
-        val bitmap = raster(file, maxEdge) ?: throw IOException("无法读取这张图片")
+        if (kind(file) == 1) return FilmEngine.decode(file.path, maxEdge, lensShading)
+        if (kind(file) != 2) throw IOException("此格式尚无保留原始精度的解码器，请使用 PNG、TIFF、JPEG 或支持的 RAW")
+        val bitmap = platform8(file) ?: throw IOException("无法读取这张图片")
         try {
-            return FilmEngine.fromBitmap(bitmap)
+            return FilmEngine.fromEncodedBitmap(bitmap).use { it.scaled(maxEdge) }
         } finally {
             bitmap.recycle()
         }
     }
 
-    private fun raster(file: File, maxEdge: Int): Bitmap? {
+    /** The remaining platform formats have at most 8-bit encoded RGB samples.
+     * ICC conversion happens in float32, before linear-light proxy scaling. */
+    private fun platform8(file: File): Bitmap? {
         val decoded = if (Build.VERSION.SDK_INT >= 28) {
-            try {
-                ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
-                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                    decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.LINEAR_EXTENDED_SRGB))
-                    val long = max(info.size.width, info.size.height)
-                    if (maxEdge in 1 until long) {
-                        val k = maxEdge.toFloat() / long
-                        decoder.setTargetSize(
-                            max(1, (info.size.width * k).roundToInt()), max(1, (info.size.height * k).roundToInt()),
-                        )
-                    }
-                }
-            } catch (e: IOException) {
-                null
+            ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                info.colorSpace?.let { decoder.setTargetColorSpace(it) }
+                decoder.isUnpremultipliedRequired = true
             }
         } else {
-            legacy(file, maxEdge)
+            BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+                inPremultiplied = false
+            })?.let { bitmap ->
+                val matrix = Matrix()
+                when (orientation(file)) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                    ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                    ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                    ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+                    ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+                    ExifInterface.ORIENTATION_TRANSPOSE -> { matrix.postRotate(90f); matrix.postScale(-1f, 1f) }
+                    ExifInterface.ORIENTATION_TRANSVERSE -> { matrix.postRotate(270f); matrix.postScale(-1f, 1f) }
+                }
+                if (matrix.isIdentity) bitmap else
+                    Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, false)
+                        .also { if (it !== bitmap) bitmap.recycle() }
+            }
         } ?: return null
-        val target = ColorSpace.get(ColorSpace.Named.LINEAR_EXTENDED_SRGB)
-        val linear = if (decoded.config == Bitmap.Config.RGBA_F16) decoded else
-            decoded.copy(Bitmap.Config.RGBA_F16, true).also { decoded.recycle() }
-        if (linear.colorSpace != target) {
-            // Canvas performs the profile conversion into an extended linear
-            // destination, retaining negative and above-white float channels.
-            val converted = Bitmap.createBitmap(linear.width, linear.height, Bitmap.Config.RGBA_F16, true, target)
-            android.graphics.Canvas(converted).drawBitmap(linear, 0f, 0f, null)
-            linear.recycle()
-            return converted
+        if (decoded.config != Bitmap.Config.ARGB_8888) {
+            decoded.recycle()
+            throw IOException("此格式尚无保留原始精度的解码器，请使用 PNG、TIFF、JPEG 或支持的 RAW")
         }
-        return linear
+        return decoded
     }
 
-    /** Android 8: no ImageDecoder. BitmapFactory with the EXIF orientation applied by hand. */
-    private fun legacy(file: File, maxEdge: Int): Bitmap? {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.path, bounds)
-        if (bounds.outWidth <= 0) return null
-        val long = max(bounds.outWidth, bounds.outHeight)
-        var sample = 1
-        if (maxEdge > 0) while (long / (sample * 2) >= maxEdge) sample *= 2
-        val o = BitmapFactory.Options().apply {
-            inSampleSize = sample
-            inPreferredConfig = Bitmap.Config.RGBA_F16
-            inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.LINEAR_EXTENDED_SRGB)
-        }
-        var bitmap = BitmapFactory.decodeFile(file.path, o) ?: return null
-        val m = Matrix()
-        when (orientation(file)) {
-            ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
-            ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
-            ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
-            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.postScale(-1f, 1f)
-            ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.postScale(1f, -1f)
-            ExifInterface.ORIENTATION_TRANSPOSE -> { m.postRotate(90f); m.postScale(-1f, 1f) }
-            ExifInterface.ORIENTATION_TRANSVERSE -> { m.postRotate(270f); m.postScale(-1f, 1f) }
-        }
-        val scaledLong = max(bitmap.width, bitmap.height)
-        if (maxEdge in 1 until scaledLong) m.postScale(maxEdge.toFloat() / scaledLong, maxEdge.toFloat() / scaledLong)
-        if (!m.isIdentity) {
-            val turned = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, m, true)
-            if (turned !== bitmap) bitmap.recycle()
-            bitmap = turned
-        }
-        return bitmap
+    private fun kind(file: File): Int {
+        val bytes = ByteArray(12)
+        val count = file.inputStream().use { it.read(bytes) }
+        if (count < 4) return 0
+        fun code(i: Int) = bytes[i].toInt() and 255
+        if (code(0) == 255 && code(1) == 216 ||
+            code(0) == 137 && bytes.copyOfRange(1, 4).toString(Charsets.US_ASCII) == "PNG" ||
+            bytes.copyOfRange(0, 2).toString(Charsets.US_ASCII) in listOf("II", "MM")) return 1
+        if (bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII) in listOf("GIF8", "RIFF") ||
+            bytes.copyOfRange(0, 2).toString(Charsets.US_ASCII) == "BM") return 2
+        // Unknown / high precision platform formats must not silently be
+        // quantized by Android's display decoder and then used for export.
+        return 0
     }
-
     private fun orientation(file: File): Int = try {
         ExifInterface(file).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
     } catch (e: Exception) {

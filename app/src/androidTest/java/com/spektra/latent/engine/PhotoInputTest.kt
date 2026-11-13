@@ -13,9 +13,69 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
+import java.util.zip.CRC32
+import java.util.zip.DeflaterOutputStream
 
 @RunWith(AndroidJUnit4::class)
 class PhotoInputTest {
+    @Test fun sixteenBitPngKeepsAdjacentCodesThatAnF16SurfaceWouldMerge() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        assertNull(FilmEngine.start(context))
+        val file = File(context.cacheDir, "precision-${System.nanoTime()}.png")
+        val codes = intArrayOf(32768, 32769, 65534, 65535)
+        try {
+            DataOutputStream(file.outputStream()).use { out ->
+                out.write(byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10))
+                fun chunk(type: String, data: ByteArray) {
+                    val kind = type.toByteArray(Charsets.US_ASCII)
+                    out.writeInt(data.size); out.write(kind); out.write(data)
+                    val crc = CRC32().apply { update(kind); update(data) }
+                    out.writeInt(crc.value.toInt())
+                }
+                val header = ByteBuffer.allocate(13).order(ByteOrder.BIG_ENDIAN)
+                    .putInt(codes.size).putInt(1).put(16.toByte()).put(2.toByte()).put(0.toByte()).put(0.toByte()).put(0.toByte())
+                chunk("IHDR", header.array())
+                val compressed = ByteArrayOutputStream()
+                DataOutputStream(DeflaterOutputStream(compressed)).use { row ->
+                    row.writeByte(0)
+                    for (v in codes) repeat(3) { row.writeShort(v) }
+                }
+                chunk("IDAT", compressed.toByteArray()); chunk("IEND", byteArrayOf())
+            }
+            Decoder.decode(file, 0).use { image ->
+                assertEquals(4, image.width); assertEquals(1, image.height)
+                val actual = image.pixels().asFloatBuffer()
+                fun linear(code: Int): Float {
+                    val v = code / 65535.0
+                    return (if (v <= .04045) v / 12.92 else Math.pow((v + .055) / 1.055, 2.4)).toFloat()
+                }
+                for (i in codes.indices) for (c in 0..2)
+                    assertEquals("16-bit sample $i/$c", linear(codes[i]), actual[i * 3 + c], .000001f)
+                assertTrue(actual[0] < actual[3]); assertTrue(actual[6] < actual[9])
+            }
+        } finally { file.delete() }
+    }
+
+    @Test fun floatExportKeepsOriginalSamplesAndHasNoF16Quantization() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        assertNull(FilmEngine.start(context))
+        val source = FloatArray(16 * 12 * 3) { i -> if (i % 3 == 0) -.010001f else .180003f + i * .000017f }
+        FilmEngine.fromLinearRgb(16, 12, source).use { image ->
+            val look = com.spektra.latent.model.Look(grain = 0f, glare = 0f)
+            FilmEngine.developFloat(image, look.photoGrade(), look.photoOrder(7), look.finish(), look.finishTable()).use { output ->
+                assertEquals(16, output.width); assertEquals(12, output.height)
+                val samples = FloatArray(16 * 12 * 3).also { output.pixels().asFloatBuffer().get(it) }
+                assertTrue(samples.all { it.isFinite() })
+                // Every normal F16 sample is on a coarser grid than float32.
+                assertTrue(samples.any { v -> v > .125f && v < 1f && v * 8192f != kotlin.math.floor(v * 8192f) })
+            }
+            val unchanged = FloatArray(source.size).also { image.pixels().asFloatBuffer().get(it) }
+            org.junit.Assert.assertArrayEquals(source, unchanged, 0f)
+        }
+    }
+
     @Test fun extendedLinearFloatBitmapKeepsNegativeAndAboveWhiteChannels() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         assertNull(FilmEngine.start(context))

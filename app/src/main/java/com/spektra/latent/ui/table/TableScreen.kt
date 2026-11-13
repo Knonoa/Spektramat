@@ -789,7 +789,7 @@ private suspend fun export(
         x0 = (-window.width / 2f - view.x) / view.s; x1 = (window.width / 2f - view.x) / view.s
         y0 = (-window.height / 2f - view.y) / view.s; y1 = (window.height / 2f - view.y) / view.s
     }
-    val requested=context.getSharedPreferences("appearance",Context.MODE_PRIVATE).getInt("exportEdge",3072)
+    val requested=context.getSharedPreferences("appearance",Context.MODE_PRIVATE).getInt("exportEdge",3072).takeIf { it > 0 } ?: 3072
     val longEdge=if(all)requested else min(requested,max(window.width,window.height)*2)
     val k = longEdge / max(x1 - x0, y1 - y0)
     val w = max(1, ((x1 - x0) * k).roundToInt())

@@ -173,8 +173,8 @@ vec3 tex_scan(vec3 c) {
 uniform sampler2D u_finish_table;
 
 vec3 tex_curve(vec3 u) {
-    vec3 x = clamp(u, 0.0, 1.0) * 255.0;
-    vec3 i0 = min(floor(x), vec3(254.0));
+    vec3 x = u * 255.0;
+    vec3 i0 = clamp(floor(x), vec3(0.0), vec3(254.0));
     vec3 f = x - i0;
     ivec3 i = ivec3(i0);
     float r = mix(texelFetch(u_finish_table, ivec2(i.x, 0), 0).r, texelFetch(u_finish_table, ivec2(i.x + 1, 0), 0).r, f.x);
