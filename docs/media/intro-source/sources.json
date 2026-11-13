@@ -1,0 +1,127 @@
+{
+  "recorded": "2026-11-13",
+  "application": "com.spektra.latent.dev",
+  "device": "emulator-5554",
+  "photographs": [
+    {
+      "qa_jpeg": "sony-a7m3.jpg",
+      "source_raw_url": "https://raw.pixls.us/getfile.php/2414/nice/Sony - ILCE-7M3 - 14bit 14bit compressed (3:2).ARW",
+      "source_raw_sha256": "250784580ea527442c09004417bb0eead484f2bf3ee8f9121a776ac65bb50d0f",
+      "licence": "CC0-1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "catalogue_licence_html": "<a href='https://creativecommons.org/publicdomain/zero/1.0/' title='Creative Commons 0 - Public Domain' class='cc'>co</a>",
+      "changes": [
+        "RAW-to-JPEG QA conversion",
+        "resize",
+        "app photo/film adjustments",
+        "screen capture viewport crop"
+      ]
+    },
+    {
+      "qa_jpeg": "canon-6d.jpg",
+      "source_raw_url": "https://raw.pixls.us/getfile.php/799/nice/Canon - EOS 6D - RAW.CR2",
+      "source_raw_sha256": "360842779d08fe4805b4a2fe4979f06fdc6da982c85c3acb181f25bcf4c9f536",
+      "licence": "CC0-1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "catalogue_licence_html": "<a href='https://creativecommons.org/publicdomain/zero/1.0/' title='Creative Commons 0 - Public Domain' class='cc'>co</a>",
+      "changes": [
+        "RAW-to-JPEG QA conversion",
+        "resize",
+        "app photo/film adjustments",
+        "screen capture viewport crop"
+      ]
+    },
+    {
+      "qa_jpeg": "nikon-z6.jpg",
+      "source_raw_url": "https://raw.pixls.us/getfile.php/3585/nice/Nikon - Z 6 - 12bit 12bit lossless compressed (3:2).NEF",
+      "source_raw_sha256": "59615b65f8a7edc92a845b2a9c8ef313d6e7d7a5d842f94e6adf786da045a6db",
+      "licence": "CC0-1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "catalogue_licence_html": "<a href='https://creativecommons.org/publicdomain/zero/1.0/' title='Creative Commons 0 - Public Domain' class='cc'>co</a>",
+      "changes": [
+        "RAW-to-JPEG QA conversion",
+        "resize",
+        "app photo/film adjustments",
+        "screen capture viewport crop"
+      ]
+    },
+    {
+      "qa_jpeg": "fuji-xt4.jpg",
+      "source_raw_url": "https://raw.pixls.us/getfile.php/3918/nice/Fujifilm - X-T4 - 14bit 14bit compressed (3:2).RAF",
+      "source_raw_sha256": "871836938ffa695f4c41765ddb107c2703ce755f7f3ced7e10f9e04746f1734e",
+      "licence": "CC0-1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "catalogue_licence_html": "<a href='https://creativecommons.org/publicdomain/zero/1.0/' title='Creative Commons 0 - Public Domain' class='cc'>co</a>",
+      "changes": [
+        "RAW-to-JPEG QA conversion",
+        "resize",
+        "app photo/film adjustments",
+        "screen capture viewport crop"
+      ]
+    },
+    {
+      "qa_jpeg": "olympus-em1m2.jpg",
+      "source_raw_url": "https://raw.pixls.us/getfile.php/1993/nice/Olympus - E-M1MarkII - 16bit (4:3).ORF",
+      "source_raw_sha256": "0b433019e5fa61548d7eb0eb7bb90894251542c056da72355202382696d0ceb8",
+      "licence": "CC0-1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "catalogue_licence_html": "<a href='https://creativecommons.org/publicdomain/zero/1.0/' title='Creative Commons 0 - Public Domain' class='cc'>co</a>",
+      "changes": [
+        "RAW-to-JPEG QA conversion",
+        "resize",
+        "app photo/film adjustments",
+        "screen capture viewport crop"
+      ]
+    }
+  ],
+  "captures": [
+    {
+      "file": "adjust.mp4",
+      "bytes": 169581,
+      "sha256": "bf22522527571dcb5665fd45bea42a6169acfebbae03a95b88e902362fb7de67",
+      "origin": "ADB real Spektramat app capture"
+    },
+    {
+      "file": "camera.jpg",
+      "bytes": 117717,
+      "sha256": "bd8a09eb32bcd70a5bdedfaf4c3effe6e4981ede2def7768f2e67210f9a293b5",
+      "origin": "ADB real Spektramat app capture"
+    },
+    {
+      "file": "compare.mp4",
+      "bytes": 216422,
+      "sha256": "4cd754c5cf6716944c6a737332c0e9ac74d9a679c32c85fe76a829998a7101c2",
+      "origin": "ADB real Spektramat app capture"
+    },
+    {
+      "file": "film.mp4",
+      "bytes": 157950,
+      "sha256": "9d8e70087368a0102050014be244c7c3f2084fff8945aa459ec380e83195b138",
+      "origin": "ADB real Spektramat app capture"
+    },
+    {
+      "file": "hero.jpg",
+      "bytes": 194875,
+      "sha256": "1eabfb5724c788ea9d26ff18bfca4216891b0bbe60c9f743aca727bf6b1c2474",
+      "origin": "ADB real Spektramat app capture"
+    },
+    {
+      "file": "print.jpg",
+      "bytes": 139823,
+      "sha256": "25151de17d838fabdbc2de5184da64e4b6b0e376a5c6abfd9f49fb4a225a9cec",
+      "origin": "ADB real Spektramat app capture"
+    },
+    {
+      "file": "projects.jpg",
+      "bytes": 104507,
+      "sha256": "a1af466059858130e6f550b72a218b77c1935d9ad1d6d674b79f0ff36581b3d5",
+      "origin": "ADB real Spektramat app capture"
+    },
+    {
+      "file": "workbench-wide.jpg",
+      "bytes": 212746,
+      "sha256": "3db6dc9daed5b71e01592c55023b392fb603ac62477b9d8e1484e58f33a42fca",
+      "origin": "ADB real Spektramat app capture"
+    }
+  ]
+}

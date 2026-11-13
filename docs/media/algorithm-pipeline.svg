@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">Spektramat photo engine and GPU preview</title>
+  <desc id="desc">Full photos use source corrections, spectral film exposure, development, optional spectral paper printing, scanning and finishing. Camera live view and video use separate baked GPU color LUTs, which approximate color and omit spatial and stochastic effects.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0L8 4.5L0 9" fill="none" stroke="#b57929" stroke-width="1.6"/></marker>
+    <linearGradient id="paper" x2="1" y2="1"><stop stop-color="#f9f5ed"/><stop offset="1" stop-color="#eee5d4"/></linearGradient>
+  </defs>
+  <rect width="1600" height="980" rx="30" fill="url(#paper)"/>
+  <g font-family="Segoe UI, Microsoft YaHei, Noto Sans CJK SC, sans-serif" fill="#29271f">
+    <text x="64" y="68" font-size="18" fill="#a2681d" letter-spacing="3">THE COLOR PROCESS</text>
+    <text x="64" y="126" font-size="38" font-weight="600">从光线，到一张完整的照片</text>
+    <text x="64" y="166" font-size="23" fill="#787267">From light to a finished photograph</text>
+    <text x="64" y="220" font-size="18" fill="#a2681d" letter-spacing="2">01 / FULL PHOTO PIPELINE</text>
+    <g fill="#fffdf8" stroke="#d8cdbb" stroke-width="1.5">
+      <rect x="64" y="248" width="264" height="206" rx="20"/>
+      <rect x="366" y="248" width="264" height="206" rx="20"/>
+      <rect x="668" y="248" width="264" height="206" rx="20"/>
+      <rect x="970" y="248" width="264" height="206" rx="20"/>
+      <rect x="1272" y="248" width="264" height="206" rx="20"/>
+    </g>
+    <g fill="none" stroke="#b57929" stroke-width="2" marker-end="url(#arrow)">
+      <path d="M338 351H353"/><path d="M640 351H655"/><path d="M942 351H957"/><path d="M1244 351H1259"/>
+    </g>
+    <g font-size="29" font-weight="600">
+      <text x="86" y="296">原片校正</text><text x="388" y="296">胶片曝光</text><text x="690" y="296">胶片显影</text><text x="992" y="296">光谱印相</text><text x="1294" y="296">扫描与整饰</text>
+    </g>
+    <g font-size="20" fill="#a2681d">
+      <text x="86" y="330">Source corrections</text><text x="388" y="330">Film exposure</text><text x="690" y="330">Development</text><text x="992" y="330">Spectral printing</text><text x="1294" y="330">Scan &amp; finish</text>
+    </g>
+    <g font-size="19" fill="#787267">
+      <text x="86" y="378">JPEG / RAW → linear RGB</text><text x="86" y="408">Exposure · white balance</text>
+      <text x="388" y="378">Spectral reconstruction</text><text x="388" y="408">Stock spectral sensitivity</text>
+      <text x="690" y="378">Density response curves</text><text x="690" y="408">Inter-layer response</text>
+      <text x="992" y="378">Paper · light · filtration</text><text x="992" y="408">Optional: direct film scan</text>
+      <text x="1294" y="378">Output color · finishing</text><text x="1294" y="408">JPEG / floating-point TIFF</text>
+    </g>
+    <text x="64" y="494" font-size="20" fill="#787267">按配方启用颗粒、光晕、扩散、片边与日期等效果 / Grain, halation, diffusion, film edges and dates when enabled</text>
+    <rect x="64" y="516" width="1472" height="60" rx="15" fill="#eae1d2"/>
+    <text x="86" y="554" font-size="21">调节页：原图 + 校正，便于独立观察调整 / Adjust stage: source + corrections, with film and paper disabled</text>
+    <text x="64" y="636" font-size="18" fill="#a2681d" letter-spacing="2">02 / LIVE VIEW &amp; VIDEO</text>
+    <g fill="#f6efdf" stroke="#d3bb92" stroke-width="1.5">
+      <rect x="64" y="662" width="348" height="132" rx="20"/>
+      <rect x="438" y="662" width="348" height="132" rx="20"/>
+      <rect x="812" y="662" width="348" height="132" rx="20"/>
+      <rect x="1186" y="662" width="350" height="132" rx="20"/>
+    </g>
+    <g font-size="27" font-weight="600">
+      <text x="87" y="711">同一颜色模型</text><text x="461" y="711">烘焙逐像素转换</text><text x="835" y="711">GPU 颜色 LUT</text><text x="1209" y="711">实时取景 / 录像</text>
+    </g>
+    <g font-size="20" fill="#787267">
+      <text x="87" y="755">Same film / print / scan model</text><text x="461" y="755">Bake the per-pixel transform</text><text x="835" y="755">GPU 3D color lookup</text><text x="1209" y="755">Live view / video recording</text>
+    </g>
+    <g fill="none" stroke="#b57929" stroke-width="2" marker-end="url(#arrow)">
+      <path d="M418 728H430"/><path d="M792 728H804"/><path d="M1166 728H1178"/>
+    </g>
+    <text x="64" y="839" font-size="21">取景与录像使用各自的 LUT；空间、随机及整图统计效果以完整照片冲印为准。</text>
+    <text x="64" y="875" font-size="20" fill="#787267">Separate LUTs for viewfinder and video. Spatial, stochastic and whole-image effects require the full photo render.</text>
+    <path d="M64 914H1536" stroke="#d8cdbb"/>
+    <text x="64" y="949" font-size="18" fill="#787267">SPEKTRAMAT · Built on spektrafilm and SpektraLab · High-level overview; effects and paths depend on the recipe</text>
+  </g>
+</svg>

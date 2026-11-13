@@ -1,0 +1,44 @@
+1
+00:00:00,000 --> 00:00:04,500
+让色彩，慢慢显影。
+Film color. A little closer.
+
+2
+00:00:04,500 --> 00:00:10,000
+选择胶片，找到色彩性格
+Choose a film. Find your color.
+
+3
+00:00:10,000 --> 00:00:15,500
+从曝光开始，把细节调回来
+Exposure, temperature, tint. Make the photograph yours.
+
+4
+00:00:15,500 --> 00:00:21,500
+原图与效果，一划即见
+Slide to compare. See every change.
+
+5
+00:00:21,500 --> 00:00:26,500
+转过屏幕，展开工作台
+A wider view. More room to create.
+
+6
+00:00:26,500 --> 00:00:31,500
+按项目整理，留住每次创作
+Your photographs. Beautifully organized.
+
+7
+00:00:31,500 --> 00:00:37,500
+实时取景与视频使用 GPU LUT；照片成片使用完整 Spektrafilm 算法。
+GPU LUT for live preview and video; full Spektrafilm pipeline for finished photos.
+
+8
+00:00:37,500 --> 00:00:42,000
+完整冲印，让照片成为作品
+Develop the full photograph. Save the result.
+
+9
+00:00:42,000 --> 00:00:46,000
+Spektramat · Android 预览版 · github.com/Knonoa/Spektramat
+Spektramat · Android preview · Film color. Made personal.
