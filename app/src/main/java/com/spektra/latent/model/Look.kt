@@ -93,7 +93,7 @@ data class Look(
     /** The part of this look a recipe keeps: everything [withRecipe] hands on, on an untouched scene. */
     fun asRecipe(): Look = Look().withRecipe(this).copy(date = date.copy(manual = ""))
 
-    /** Video grade with a fixed exposure; photographs use [photoGrade] and native metering. */
+    /** Fixed exposure for video and source-adjustment previews; full photos meter natively. */
     fun grade(meteredEv: Float): FloatArray {
         return photoGrade().also { it[3] = 2f.pow(exposure + meteredEv) }
     }
@@ -260,7 +260,13 @@ object Controls {
         Control(id, label, -100f, 100f, 1f, 0f, 50f, ::signed, get, set)
 
     val scene = listOf(
-        Control("exposure", "曝光", -4f, 4f, 0.05f, 0f, 1f, ::ev, { it.exposure }) { l, v -> l.copy(exposure = v) },
+        // The workbench's exposure is an image-brightness control. Reference
+        // camera EV still runs after metering, but automatic print compensation
+        // must not cancel the change the person is making. Restored looks keep
+        // their original model until exposure is explicitly edited.
+        Control("exposure", "曝光", -4f, 4f, 0.05f, 0f, 1f, ::ev, { it.exposure }) { l, v ->
+            l.copy(exposure = v, model = l.model.copy(printExposureCompensation = false))
+        },
         hundred("temperature", "色温", { it.temperature }) { l, v -> l.copy(temperature = v) },
         hundred("tint", "色调", { it.tint }) { l, v -> l.copy(tint = v) },
         hundred("contrast", "对比度", { it.contrast }) { l, v -> l.copy(contrast = v) },

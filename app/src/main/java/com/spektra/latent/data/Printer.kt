@@ -13,6 +13,7 @@ import com.spektra.latent.APP_NAME
 import com.spektra.latent.Journal
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
+import com.spektra.latent.engine.DevelopCancelled
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.engine.StageListener
 import com.spektra.latent.model.Look
@@ -48,6 +49,7 @@ object Printer {
         look: Look,
         longEdge: Int,
         format: PrintFormat = PrintFormat.AUTO,
+        shouldStop: () -> Boolean = { false },
         onStage: (Int) -> Unit,
     ): Printed = withContext(Dispatchers.IO) {
         onStage(0)
@@ -55,6 +57,7 @@ object Printer {
         val shooting = if (look.edge.on || look.date.on) Shooting.of(frame) else null
         val outputModel = look.model
         val print: Bitmap = Decoder.decode(frame.file, edge, look.lensShading, look.aspect).use { original ->
+            if (shouldStop()) throw DevelopCancelled()
             // the engine's grain and halation are sized on the film: the same frame, whatever the print's size
             FilmEngine.develop(
                 original, look.photoGrade(),
@@ -68,6 +71,9 @@ object Printer {
             )
         }
         try {
+            // Cancellation can arrive during decoding, before the native
+            // engine resets its cancellation flag, or just after rendering.
+            if (shouldStop()) throw DevelopCancelled()
             val floating = format != PrintFormat.JPEG && print.config == Bitmap.Config.RGBA_F16
             val name = fileName(frame, look, floating)
             val uri = save(context, print, name, outputModel, floating)

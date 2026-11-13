@@ -23,13 +23,15 @@ import com.spektra.latent.gl.PreviewFrame
 import com.spektra.latent.model.Look
 import com.spektra.latent.model.Shooting
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import kotlin.math.max
 
 /**
  * One photograph on the bench: its look while it is being worked on, the undo
@@ -46,12 +48,14 @@ class DarkroomState(
     private val library: Library,
     val frame: Frame,
     private val scope: CoroutineScope,
-) {
+    initialAdjustmentsOnly: Boolean = false,
+) : LookHost {
     private val app = context.applicationContext as LatentApp
+    private val appearance = context.getSharedPreferences("appearance", Context.MODE_PRIVATE)
     private val main = Handler(Looper.getMainLooper())
     val preview = FilmPreview()
 
-    var look by mutableStateOf(frame.look)
+    override var look by mutableStateOf(frame.look)
         private set
     private var settled = frame.look
     private val undone = ArrayDeque<Look>()
@@ -64,10 +68,19 @@ class DarkroomState(
     /** A full-engine proof has been published. Until then the thumbnail stands in. */
     var ready by mutableStateOf(false)
         private set
+    /** The adjustment tab shows source corrections independently of the film simulation. */
+    var adjustmentsOnly by mutableStateOf(initialAdjustmentsOnly)
+        private set
     var failure by mutableStateOf<String?>(null)
         private set
     /** Held down: the picture as it came, without the film. */
     var comparing by mutableStateOf(false)
+        private set
+    internal var comparisonMode by mutableStateOf(
+        runCatching { ComparisonMode.valueOf(appearance.getString("photoComparison", "Hold")!!) }.getOrDefault(ComparisonMode.Hold),
+    )
+        private set
+    internal var comparisonFraction by mutableStateOf(.5f)
         private set
     var placement by mutableStateOf(Placement())
         private set
@@ -75,6 +88,15 @@ class DarkroomState(
     /** The engine's small print, including the film edge and date when requested. */
     var proof by mutableStateOf<ImageBitmap?>(null)
         private set
+    var proofGate by mutableStateOf(floatArrayOf(0f,0f,1f,0f,1f,1f,0f,1f))
+        private set
+    var proofSourceQuad by mutableStateOf(PhotoComparison.identity())
+        private set
+    var proofDateBounds by mutableStateOf(floatArrayOf())
+        private set
+    var original by mutableStateOf<ImageBitmap?>(null)
+        private set
+
     /** A proof is being made for a look newer than the one [proof] shows. */
     var proofing by mutableStateOf(false)
         private set
@@ -93,7 +115,7 @@ class DarkroomState(
     @Volatile private var loadGeneration = 0L
     private var proofJob: Job? = null
     // declared before init: the collector started there reads it at once
-    private data class Want(val look: Look, val sharp: Boolean)
+    private data class Want(val look: Look, val sharp: Boolean, val adjustmentsOnly: Boolean)
     private val wants = MutableStateFlow<Want?>(null)
     @Volatile private var disposed = false
 
@@ -118,6 +140,8 @@ class DarkroomState(
                 Decoder.decode(frame.file, PREVIEW_EDGE, key.lensShading, key.aspect).use { image ->
                     if (disposed || generation != loadGeneration) return@use
                     preview.setImage(image)
+                    val display = FilmEngine.display(image).asImageBitmap()
+                    main.post { if(!disposed && generation==loadGeneration) original=display }
                     val small = image.scaled(PROOF_EDGE)
                     synchronized(sourceLock) {
                         if (disposed || generation != loadGeneration) {
@@ -140,7 +164,21 @@ class DarkroomState(
 
     // ---- the look
 
-    fun change(next: Look) {
+    fun showAdjustmentsOnly(on: Boolean) {
+        if (on == adjustmentsOnly) return
+        adjustmentsOnly = on
+        comparing = false
+        // Do not display a stale film result in the adjustment workspace.
+        proof = null
+        ready = false
+        proofGate = WHOLE_GATE.copyOf()
+        proofSourceQuad = PhotoComparison.identity()
+        proofDateBounds = floatArrayOf()
+        placement = clamp(Placement())
+        show()
+    }
+
+    override fun change(next: Look) {
         if (next == look) return
         val reshaped = next.aspect != look.aspect
         val reload = reshaped || next.lensShading != look.lensShading
@@ -152,7 +190,7 @@ class DarkroomState(
         show()
     }
 
-    fun commit() {
+    override fun commit() {
         if (look == settled) return
         undone.addLast(settled)
         if (undone.size > 200) undone.removeFirst()
@@ -202,31 +240,33 @@ class DarkroomState(
 
     // ---- where the picture sits
 
-    fun layout(width: Float, height: Float, top: Float, bottom: Float) {
+    /** Dimensions are local to the clipped photo viewport, never to the whole screen. */
+    fun layout(width: Float, height: Float) {
+        if (viewW == width && viewH == height) return
         viewW = width
         viewH = height
-        val p = placement.copy(insetTop = top, insetBottom = bottom)
-        placement = clamp(p)
+        // Rotation and opening/closing the tray both start with the entire photograph visible.
+        placement = clamp(Placement())
         show()
     }
 
     fun transform(centroid: Offset, pan: Offset, zoom: Float) {
-        val p = placement
-        val scale = (p.scale * zoom).coerceIn(1f, MAX_ZOOM)
-        val k = scale / p.scale
-        // the point under the fingers stays under the fingers
-        val cx = p.insetLeft + (viewW - p.insetLeft - p.insetRight) / 2f
-        val cy = p.insetTop + (viewH - p.insetTop - p.insetBottom) / 2f
-        val px = (p.panX - (centroid.x - cx)) * k + (centroid.x - cx) + pan.x
-        val py = (p.panY - (centroid.y - cy)) * k + (centroid.y - cy) + pan.y
-        placement = clamp(p.copy(scale = scale, panX = px, panY = py))
+        val size = shownSize
+        placement = PhotoViewport.transform(
+            placement, viewW, viewH, size[0], size[1],
+            centroid.x, centroid.y, pan.x, pan.y, zoom,
+        )
+        show()
+    }
+
+    fun fit() {
+        placement = Placement()
         show()
     }
 
     fun toggleZoom(at: Offset) {
         if (placement.scale > 1.01f) {
-            placement = placement.copy(scale = 1f, panX = 0f, panY = 0f)
-            show()
+            fit()
         } else {
             transform(at, Offset.Zero, 3f)
         }
@@ -235,19 +275,24 @@ class DarkroomState(
     fun compare(on: Boolean) {
         if (comparing == on) return
         comparing = on
+        placement = clamp(placement)
         show()
+    }
+
+    internal fun comparisonMode(mode: ComparisonMode) {
+        comparisonMode = mode
+        appearance.edit().putString("photoComparison", mode.name).apply()
+        compare(false)
+    }
+
+    internal fun comparisonFraction(fraction: Float) {
+        comparisonFraction = PhotoComparison.fraction(fraction)
     }
 
     /** The picture may be moved only as far as it overflows the space it is fitted into. */
     private fun clamp(p: Placement): Placement {
-        if (viewW <= 0f || viewH <= 0f) return p
         val size = shownSize
-        val r = p.copy(panX = 0f, panY = 0f).rect(viewW, viewH, size[0], size[1])
-        val availW = viewW - p.insetLeft - p.insetRight
-        val availH = viewH - p.insetTop - p.insetBottom
-        val maxX = max(0f, (r[2] - availW) / 2f)
-        val maxY = max(0f, (r[3] - availH) / 2f)
-        return p.copy(panX = p.panX.coerceIn(-maxX, maxX), panY = p.panY.coerceIn(-maxY, maxY))
+        return PhotoViewport.clamp(p, viewW, viewH, size[0], size[1])
     }
 
     private fun show() {
@@ -265,11 +310,13 @@ class DarkroomState(
         // Every darkroom frame is a photo render, including a plain frame
         // without film edge/date. The previous exact proof stays visible while
         // the latest look is rendered.
-        val want = Want(l, l == settled)
+        val want = Want(l, l == settled, adjustmentsOnly)
         if (wants.value == want) return
         proofing = true
-        wants.value = want
+        // Stop the previous render before publishing its replacement. Publishing
+        // first could let the worker start the new render and cancel that one.
         FilmEngine.cancelProof()
+        wants.value = want
     }
 
     private suspend fun proofs() = wants.collectLatest { want ->
@@ -277,13 +324,33 @@ class DarkroomState(
         // the original may still be being read, or read again in a new shape
         val key = SourceKey(want.look.aspect, want.look.lensShading)
         while (loadedSource != key) delay(60)
+        while (!disposed && wants.value == want) {
+            currentCoroutineContext().ensureActive()
+            try {
+                makeProof(want, key)
+                break
+            } catch (e: DevelopCancelled) {
+                // A leaving screen can also cancel the shared proof lane. If
+                // this is still the latest request, retry instead of leaving
+                // the last picture on screen with proofing stuck forever.
+                currentCoroutineContext().ensureActive()
+                delay(24)
+            }
+        }
+    }
+
+    private suspend fun makeProof(want: Want, key: SourceKey) {
         try {
             val l = want.look
             val source = synchronized(sourceLock) {
                 if (loadedSource == key) proofSource?.scaled(if (want.sharp) PROOF_EDGE else DRAFT_EDGE) else null
-            } ?: return@collectLatest
+            } ?: return
+            val gate = if (want.adjustmentsOnly) WHOLE_GATE.copyOf() else rebate(l).pictureGate(source.width,source.height)
+            val sourceQuad = if (want.adjustmentsOnly) PhotoComparison.identity() else rebate(l).pictureSource(source.width,source.height)
+            val dateBounds = if (want.adjustmentsOnly) floatArrayOf() else rebate(l).dateBounds(source.width,source.height,l.formatUm/1000f)
             val bitmap = source.use { copy ->
-                FilmEngine.develop(
+                if (want.adjustmentsOnly) FilmEngine.adjustPhoto(copy, l.grade(0f), l.finish(), l.finishTable())
+                else FilmEngine.develop(
                     copy, l.photoGrade(),
                     l.order(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number),
                     l.finish(), l.finishTable(), lane = FilmEngine.PROOF,
@@ -293,6 +360,9 @@ class DarkroomState(
             main.post {
                 if (!disposed && wants.value == want && loadedSource == key) {
                     proof = image
+                    proofGate = gate
+                    proofSourceQuad = sourceQuad
+                    proofDateBounds = dateBounds
                     ready = true
                     failure = null
                     placement = clamp(placement)
@@ -300,7 +370,9 @@ class DarkroomState(
                 } else bitmap.recycle()
             }
         } catch (e: DevelopCancelled) {
-            // a newer look is waiting
+            throw e
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             if (wants.value == want && !disposed) {
                 Journal.w(TAG, "no proof", e)
@@ -337,6 +409,7 @@ class DarkroomState(
 
     companion object {
         private const val TAG = "latent-darkroom"
+        private val WHOLE_GATE = floatArrayOf(0f, 0f, 1f, 0f, 1f, 1f, 0f, 1f)
         /** Long edge of the picture the preview works on. */
         const val PREVIEW_EDGE = 2048
         /** Long edge of the picture a settled proof is made from, and of one made while a ruler is moving. */

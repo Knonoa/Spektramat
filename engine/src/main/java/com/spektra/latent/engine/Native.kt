@@ -22,6 +22,7 @@ internal object Native {
     external fun imageInfo(image: Long): IntArray
     external fun imagePixels(image: Long): ByteBuffer?
     external fun display(image: Long, out: Bitmap): String?
+    external fun adjustPhoto(image: Long, grade: FloatArray, finish: FloatArray, finishTable: FloatArray, out: Bitmap): String?
     external fun meter(image: Long): Float
     external fun release(image: Long)
     external fun wbGains(temperature: Float, tint: Float): FloatArray
@@ -62,6 +63,9 @@ internal object Native {
                                   finish: FloatArray, finishTable: FloatArray, out: Bitmap): String?
     external fun cancelDevelop()
     external fun cancelProof()
+    external fun proofDateBounds(w:Int,h:Int,longMm:Float,rebate:Array<String>,rebateNumbers:FloatArray):FloatArray?
+    external fun proofGate(w:Int,h:Int,rebate:Array<String>,rebateNumbers:FloatArray): FloatArray?
+    external fun proofSource(w:Int,h:Int,rebate:Array<String>,rebateNumbers:FloatArray): FloatArray?
     external fun developSize(w: Int, h: Int, rebate: Array<String>?, rebateNumbers: FloatArray?): IntArray?
     external fun develop(
         image: Long, grade: FloatArray, film: String, paper: String, scanFilm: Boolean,

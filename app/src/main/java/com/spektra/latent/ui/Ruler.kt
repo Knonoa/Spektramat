@@ -1,59 +1,52 @@
 package com.spektra.latent.ui
 
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.exponentialDecay
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.horizontalDrag
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.ui.input.pointer.util.VelocityTracker
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
-import androidx.compose.ui.text.drawText
-import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.launch
 import kotlin.math.abs
-import kotlin.math.ceil
-import kotlin.math.floor
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
+private val needleGlow = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+
 /**
- * The app's one way of setting a number: a scale that slides under a fixed
- * amber needle, like the distance scale of a lens.
+ * The app's one way of setting a number: a needle over a scale.
  *
- * Drag to move the scale; let go while moving and it coasts. It clicks (a
- * light haptic) at every numbered mark and holds a little at the default, so
- * "back to zero" can be felt without looking. Double-tap returns to the
+ * The scale has eight long marks with five short ones to each. A line runs
+ * from where the value rests ([origin]: zero, or the low end) to the needle.
+ * Both are neutral while the value is at its [default] and light up amber once
+ * it has been moved.
+ *
+ * Drag sideways anywhere on it: the needle moves by as much as the finger
+ * does, so it never jumps to where it was touched -- the scale sits in a list
+ * that scrolls, and a touch on the way past must not change a value. The
+ * origin holds the needle a little ([sticky]); double-tap goes back to the
  * default.
  *
- * @param major spacing of the numbered marks, in the value's unit; ten small
- *   marks to each.
  * @param onChange every step while moving
- * @param onSettled once, when the hand and the coasting have both stopped
+ * @param onSettled once, when the hand has let go
  */
 @Composable
 fun Ruler(
@@ -62,140 +55,104 @@ fun Ruler(
     min: Float,
     max: Float,
     step: Float,
-    major: Float,
     default: Float,
-    label: (Float) -> String,
     onChange: (Float) -> Unit,
     onSettled: () -> Unit,
     modifier: Modifier = Modifier,
+    origin: Float = if (min < 0f) 0f else min,
+    sticky: Boolean = true,
+    enabled: Boolean = true,
 ) {
-    val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
-    val scope = rememberCoroutineScope()
-    val measurer = rememberTextMeasurer()
-    val minor = major / 10f
-    val spacing = with(density) { 12.dp.toPx() }
-    val pxPerUnit = spacing / minor
-    val detent = minor * 0.4f
-
     val change by rememberUpdatedState(onChange)
     val settled by rememberUpdatedState(onSettled)
     val current by rememberUpdatedState(value)
+    val span = max - min
 
-    // where the scale is; between steps while it moves
-    var position by remember { mutableFloatStateOf(value) }
-    val coast = remember { Animatable(value) }
     fun quantise(v: Float): Float {
-        val q = (v / step).roundToInt() * step
-        return (if (abs(v - default) < detent) default else q).coerceIn(min, max)
+        var q = (v / step).roundToInt() * step
+        if (sticky && abs(q - origin) < step * 1.5f) q = origin
+        return q.coerceIn(min, max)
     }
-    // an undo, a reset or another photograph moved the value from outside
-    LaunchedEffect(value) {
-        if (abs(quantise(position) - value) > step * 0.5f) {
-            coast.stop()
-            position = value
-        }
-    }
-    fun moveTo(v: Float) {
-        val clamped = v.coerceIn(min, max)
-        position = clamped
-        val q = quantise(clamped)
-        if (q != current) {
-            val crossedMajor = floor(q / major) != floor(current / major) || q == default
-            if (crossedMajor) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-            change(q)
-        }
-    }
+
+    val text = Ink.GlassText
+    val dim = Ink.GlassDim
+    val accent = Ink.Accent
+    val tick = Ink.Tick
+    val major = Ink.TickMajor
+    val light = Ink.light
 
     Canvas(
         modifier
             .fillMaxWidth()
-            .height(60.dp)
+            .height(30.dp)
             .semantics {
                 contentDescription = name
                 progressBarRangeInfo = ProgressBarRangeInfo(value, min..max)
                 setProgress { target -> change(quantise(target)); settled(); true }
             }
-            .pointerInput(min, max, step, major, default) {
+            .pointerInput(min, max, step, default, enabled) {
+                if (!enabled) return@pointerInput
                 detectTapGestures(onDoubleTap = {
-                    scope.launch {
-                        coast.stop()
-                        coast.snapTo(position)
-                        coast.animateTo(default, spring(stiffness = 300f)) { moveTo(this.value) }
-                        moveTo(default)
+                    if (current != default) {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        change(default)
                         settled()
                     }
                 })
             }
-            .pointerInput(min, max, step, major, default) {
-                val friction = exponentialDecay<Float>(frictionMultiplier = 2.4f)
-                val tracker = VelocityTracker()
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    scope.launch { coast.stop() }
-                    tracker.resetTracking()
-                    tracker.addPosition(down.uptimeMillis, down.position)
-                    var dragged = false
-                    horizontalDrag(down.id) { c ->
-                        val dx = c.positionChange().x
-                        if (dx != 0f) {
-                            dragged = true
-                            tracker.addPosition(c.uptimeMillis, c.position)
-                            c.consume()
-                            moveTo(position - dx / pxPerUnit)
-                        }
-                    }
-                    if (dragged) {
-                        val velocity = -tracker.calculateVelocity().x / pxPerUnit
-                        scope.launch {
-                            if (abs(velocity) > 3f * minor) {
-                                coast.updateBounds(min, max)
-                                coast.snapTo(position)
-                                coast.animateDecay(velocity, friction) { moveTo(this.value) }
-                            }
-                            // rest on a step, not between two
-                            position = quantise(position)
-                            settled()
-                        }
+            .pointerInput(min, max, step, default, origin, sticky, enabled) {
+                if (!enabled) return@pointerInput
+                var start = 0f
+                var travelled = 0f
+                var moved = false
+                detectHorizontalDragGestures(
+                    onDragStart = {
+                        start = current
+                        travelled = 0f
+                        moved = false
+                    },
+                    onDragEnd = { if (moved) settled() },
+                    onDragCancel = { if (moved) settled() },
+                ) { input, dx ->
+                    input.consume()
+                    travelled += dx
+                    val q = quantise(start + travelled / size.width * span)
+                    if (q != current) {
+                        moved = true
+                        if (q == origin || q == default || q == min || q == max) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        change(q)
                     }
                 }
             },
     ) {
-        val cx = size.width / 2f
-        val half = size.width / 2f
-        val baseline = size.height * 0.62f
-        val shown = if (abs(position - default) < detent) default else position
-        val first = ceil((shown - half / pxPerUnit) / minor).toInt()
-        val last = floor((shown + half / pxPerUnit) / minor).toInt()
-        for (k in first..last) {
-            val v = k * minor
-            if (v < min - minor * 0.01f || v > max + minor * 0.01f) continue
-            val x = cx + (v - shown) * pxPerUnit
-            val edge = 1f - (abs(x - cx) / half).let { it * it }   // the scale fades into the sides
-            val isMajor = k % 10 == 0
-            val isMid = k % 5 == 0
-            val length = if (isMajor) 20.dp.toPx() else if (isMid) 13.dp.toPx() else 8.dp.toPx()
-            tick(x, baseline - length, baseline, (if (isMajor) Ink.Dim else Ink.Faint).copy(alpha = edge), 1.dp.toPx())
-            if (isMajor) {
-                val text = measurer.measure(label(v), Type.edgeSmall)
-                drawText(text, topLeft = Offset(x - text.size.width / 2f, baseline + 5.dp.toPx()), alpha = edge)
-            }
+        val w = size.width
+        val h = size.height
+        val px = 1.dp.toPx()
+        val floor = h - 4.dp.toPx()
+        // eight long marks, five short ones to each
+        for (i in 0..40) {
+            val x = min(w - px / 2, i / 40f * (w - px) + px / 2)
+            val long = i % 5 == 0
+            tick(x, floor - (if (long) 10 else 5).dp.toPx(), floor, if (long) major else tick, px)
         }
-        // where the default is: a small mark below the scale
-        val dx = cx + (default - shown) * pxPerUnit
-        if (dx > 0f && dx < size.width) {
-            drawCircle(Ink.Dim, radius = 1.6.dp.toPx(), center = Offset(dx, baseline - 26.dp.toPx()))
+        val set = value != default
+        val p = ((value - min) / span).coerceIn(0f, 1f) * w
+        val o = ((origin - min) / span).coerceIn(0f, 1f) * w
+        // from where it rests to where it is
+        if (p != o) {
+            drawRect(
+                (if (set) accent else dim).copy(alpha = if (set) .8f else .6f),
+                Offset(min(p, o), floor - 1.5.dp.toPx()), Size(abs(p - o), 1.5.dp.toPx()),
+            )
         }
-        // the needle
-        tick(cx, baseline - 30.dp.toPx(), baseline + 2.dp.toPx(), Ink.Amber, 2.dp.toPx())
-        drawPath(
-            Path().apply {
-                moveTo(cx - 4.dp.toPx(), baseline - 36.dp.toPx())
-                lineTo(cx + 4.dp.toPx(), baseline - 36.dp.toPx())
-                lineTo(cx, baseline - 30.dp.toPx())
-                close()
-            },
-            Ink.Amber,
-        )
+        val ink = if (set) accent else text
+        if (set && !light) drawIntoCanvas {
+            needleGlow.color = Ink.Amber.copy(alpha = .45f).toArgb()
+            needleGlow.maskFilter = android.graphics.BlurMaskFilter(5.dp.toPx(), android.graphics.BlurMaskFilter.Blur.NORMAL)
+            it.nativeCanvas.drawRect(p - px, 2.dp.toPx(), p + px, h - 2.dp.toPx(), needleGlow)
+        }
+        drawRect(ink, Offset(p - .75.dp.toPx(), 2.dp.toPx()), Size(1.5.dp.toPx(), h - 4.dp.toPx()))
+        drawRoundRect(ink, Offset(p - 4.5.dp.toPx(), 0f), Size(9.dp.toPx(), 4.dp.toPx()), CornerRadius(2.dp.toPx()))
     }
 }

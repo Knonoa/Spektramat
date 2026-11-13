@@ -35,6 +35,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -52,7 +53,7 @@ class TetherDevice(val name: String, val usb: UsbDevice?) {
 /**
  * The monitor: a camera on a USB cable. It shows the camera's live view (with
  * the film, if wanted), says how the camera is set, records what it shows, and
- * receives each photograph the camera takes into today's tethered roll.
+ * receives each photograph the camera takes into the selected library project.
  *
  * It belongs to the app, not to a screen: once connected it keeps receiving
  * while the person is in the library or the darkroom. Its state is read by
@@ -84,6 +85,22 @@ class Monitor(context: Context, private val library: Library, private val scope:
     var recording by mutableStateOf(false); private set
     var recordedMs by mutableStateOf(0L); private set
     var notice by mutableStateOf<String?>(null)
+    /** The same projects shown by the darkroom library, not a second list. */
+    val projects get() = library.rolls
+    var projectId by mutableStateOf(prefs.getLong("project", -1L).takeIf { it > 0L }); private set
+    var recentShots by mutableStateOf<List<Frame>>(emptyList()); private set
+
+    fun selectProject(id: Long) {
+        if (library.rolls.value.none { it.id == id }) return
+        projectId = id
+        prefs.edit().putLong("project", id).apply()
+    }
+
+    suspend fun createProject(name: String): Long {
+        val id = library.createProject(name)
+        selectProject(id)
+        return id
+    }
 
     /** The long edge of the monitored picture is fitted into 480p or 720p. */
     var resolution by mutableIntStateOf(prefs.getInt("resolution", 720)); private set
@@ -130,6 +147,18 @@ class Monitor(context: Context, private val library: Library, private val scope:
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         refresh()
+        scope.launch {
+            library.rolls.collect { projects ->
+                if (projectId != null && projects.none { it.id == projectId }) {
+                    projectId = null
+                    prefs.edit().remove("project").apply()
+                    if (connected || busy) notice = "归档项目已移除，请选择新的项目。正在接收的原片会保留。"
+                }
+                val frames = projects.flatMap { it.frames }.associateBy { it.id }
+                recentShots = recentShots.mapNotNull { frames[it.id] }
+                lastShot = lastShot?.let { frames[it.id] }
+            }
+        }
         // photographs that had arrived whole when the app last stopped, but were not filed yet
         scope.launch { fileLeftovers() }
     }
@@ -147,6 +176,10 @@ class Monitor(context: Context, private val library: Library, private val scope:
 
     fun connect(device: TetherDevice) {
         if (task?.isActive == true || busy) return
+        if (library.rolls.value.none { it.id == projectId }) {
+            notice = "先选一个项目，原片会直接归入这个项目。"
+            return
+        }
         stopping = false
         busy = true
         val u = device.usb
@@ -308,6 +341,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
                         if (missingSince == 0L) missingSince = now
                         if (now - missingSince > 5000) {
                             endRecording()
+                            stale = picture != null
                             status = "${camera.model}，已连接，但没有取景画面。看看相机的 PC 遥控设置。"
                         }
                         delay(80)
@@ -315,6 +349,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
                     }
                     if (missingSince != 0L) {
                         missingSince = 0L
+                        stale = false
                         status = "${camera.model}，已连接"
                     }
                     val fitted = fit(raw, resolution)
@@ -404,6 +439,9 @@ class Monitor(context: Context, private val library: Library, private val scope:
     }
 
     private suspend fun receive(camera: TetherCamera) {
+        // Changing projects while a file is transferring only affects the next photograph.
+        val destination = projectId
+        val captureLook = look
         val info = camera.photoInfo()
         val wanted = info.name.substringAfterLast('/').substringAfterLast('\\').replace(Regex("[^A-Za-z0-9._-]"), "_").take(90)
         val name = wanted.takeIf { n -> KEPT.any { n.endsWith(".$it", ignoreCase = true) } }
@@ -416,19 +454,30 @@ class Monitor(context: Context, private val library: Library, private val scope:
             // From here on this file may be the only copy there is (a camera set to "computer only" keeps none):
             // it is given its name first, and filed second. If the app stops in between it is filed at the next start.
             val whole = File(incoming, "${System.nanoTime()}_$name")
+            // Metadata must never prevent preserving a fully transferred original.
+            runCatching {
+                destination?.let { File(incoming, whole.name + ".project").writeText(it.toString()) }
+                File(incoming, whole.name + ".look").writeText(captureLook.toJson().toString())
+            }.onFailure { Journal.w(TAG, "capture metadata could not be persisted", it) }
             if (!partial.renameTo(whole)) throw IOException("收到的照片没能改名保存")
-            file(whole, name)
+            file(whole, name, destination, captureLook)
         } finally {
             transfer = -1f
             partial.delete()
         }
     }
 
-    /** Files a received original on today's tethered roll with the monitor's look, and copies it out if asked. */
-    private suspend fun file(whole: File, name: String) {
+    /** Files a received original under its chosen project, retaining that choice across restarts. */
+    private suspend fun file(whole: File, name: String, project: Long? = null, capturedLook: Look? = null) {
         val copy = if (publicCopy) File(incoming, "copy-${System.nanoTime()}").also { whole.copyTo(it, overwrite = true) } else null
         val raw = FilmEngine.isRaw(whole.path)
-        val frame = library.addCapture(whole, name, look, metered = if (raw) null else 0f, roll = library.tetherRoll(), keepOnFailure = true)
+        val destinationFile = File(incoming, whole.name + ".project")
+        val lookFile = File(incoming, whole.name + ".look")
+        val savedProject = runCatching { destinationFile.readText().trim().toLongOrNull() }.getOrNull()
+        val wantedProject = project ?: savedProject ?: projectId
+        val destination = wantedProject?.takeIf { id -> library.rolls.value.any { it.id == id } } ?: library.tetherRoll()
+        val captureLook = capturedLook ?: runCatching { Look.fromJson(lookFile.readText()) }.getOrElse { look }
+        val frame = library.addCapture(whole, name, captureLook, metered = if (raw) null else 0f, roll = destination, keepOnFailure = true)
         if (frame == null) {
             // the library cannot read it, but it is a photograph someone took: it is handed over, never dropped
             copy?.delete()
@@ -441,10 +490,17 @@ class Monitor(context: Context, private val library: Library, private val scope:
                 whole.renameTo(kept)
                 "收到了 $name，但片库读不了它。文件留在 App 里，没有丢。"
             }
+            destinationFile.delete()
+            lookFile.delete()
             return
         }
+        destinationFile.delete()
+        lookFile.delete()
         received++
-        lastShot = frame
+        // A project may have been removed while its last transfer was being
+        // filed. Only live catalogue entries can become shortcuts to the bench.
+        lastShot = library.frame(frame.id)
+        recentShots = (listOfNotNull(lastShot) + recentShots).distinctBy { it.id }.take(12)
         if (copy != null) {
             try {
                 savePublic(copy, name)
@@ -462,7 +518,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
     private suspend fun fileLeftovers() = withContext(Dispatchers.IO) {
         val files = incoming.listFiles() ?: return@withContext
         for (f in files) {
-            if (f.isDirectory) continue
+            if (f.isDirectory || f.name.endsWith(".project") || f.name.endsWith(".look")) continue
             when {
                 f.name.endsWith(".partial") || f.name.startsWith("copy-") -> f.delete()
                 f.name.endsWith(".mp4") -> try {
@@ -473,6 +529,9 @@ class Monitor(context: Context, private val library: Library, private val scope:
                 }
                 else -> file(f, f.name.substringAfter('_'))
             }
+        }
+        incoming.listFiles { f -> f.name.endsWith(".project") || f.name.endsWith(".look") }?.forEach {
+            if (!File(incoming, it.name.substringBeforeLast('.')).exists()) it.delete()
         }
     }
 

@@ -2485,6 +2485,27 @@ void overscan_imprints(const OverscanLayout& L, const OverscanParams& o, const D
     }
 }
 
+bool overscan_date_bounds(const OverscanLayout& L, const OverscanParams& o, const DateImprintParams& d,
+                          double frame_w_mm, double frame_h_mm, float bounds[4]) {
+    if (!d.active || !L.canvas_w || !L.canvas_h) return false;
+    Params params;
+    params.film_render.overscan=o;
+    std::vector<Group> edge, groups;
+    imprint_groups(L,params,frame_w_mm,frame_h_mm,edge);
+    params.film_render.date_imprint=d;
+    imprint_groups(L,params,frame_w_mm,frame_h_mm,groups);
+    int bx0=L.canvas_w,by0=L.canvas_h,bx1=0,by1=0;
+    for (size_t i=edge.size();i<groups.size();++i) {
+        std::vector<float> cov; int x,y,w,h;
+        if (!rasterise(L,groups[i],cov,x,y,w,h)) continue;
+        bx0=std::min(bx0,x);by0=std::min(by0,y);bx1=std::max(bx1,x+w);by1=std::max(by1,y+h);
+    }
+    if (bx1<=bx0 || by1<=by0) return false;
+    bounds[0]=float(bx0)/L.canvas_w;bounds[1]=float(by0)/L.canvas_h;
+    bounds[2]=float(bx1)/L.canvas_w;bounds[3]=float(by1)/L.canvas_h;
+    return true;
+}
+
 // (4): overscan.metal `spk_overscan_film_present`.
 void overscan_film_present(const OverscanLayout& L, float* const cmy[3]) {
     const uint32_t cw = L.canvas_w;

@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas as AndroidCanvas
 import android.graphics.Paint
+import android.graphics.Path as AndroidPath
 import android.graphics.Typeface
 import android.provider.Settings
 import androidx.compose.foundation.Canvas
@@ -11,257 +12,71 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.core.content.res.ResourcesCompat
+import com.spektra.latent.R
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.pow
 import kotlin.math.roundToInt
-import kotlin.math.sin
-import kotlinx.coroutines.delay
 
 /*
- * The character matrix: how this app looks when it is waiting, empty, or at
- * work on something it cannot show yet.
+ * The character matrix: how this app looks when there is nothing to see yet --
+ * starting up, a bench with no photograph on it, a monitor with no camera.
  *
- * A grid of monospace characters whose weight follows a field of brightness:
- * slow noise (the room at rest), a word, or a photograph -- which then shows
- * through as characters, each in the colour of the picture under it. It is
- * drawn at a modest frame rate and only while it is on screen.
+ * A grid of characters that change all the time. Where the thing they stand
+ * for is (a word, a strip of film, a camera) they are dense; elsewhere a few
+ * faint ones come and go. A line of light passes down the grid, and what it
+ * touches of the shape turns amber for a moment.
  */
 
-/** From nothing to solid: the characters a cell can be, by how bright the field is there. */
-private const val RAMP = " .·:-=+*xX#%@"
+private const val GLYPHS = "▚▞░▒▓#@%&$*+=-<>/\\|0123456789ABCDEF"
 
-/** What the grid shows. */
+/** What the characters gather into. Lengths are in dp, as the design gives them. */
 sealed interface GlyphSubject {
-    /** Slow drifting noise. */
+    /** Nothing: only the faint ones. */
     data object Room : GlyphSubject
 
-    /**
-     * A word standing out of the noise in dense, flickering characters. Latin capitals and digits read best;
-     * a word too long for the grid to hold as drawn letters is set in dots, and then only those are known.
-     */
-    data class Word(val text: String) : GlyphSubject
+    /** A strip of empty 135 frames, slowly advancing: nothing is loaded yet. [frac] of the height, about [centre]. */
+    data class Film(val frac: Float = .3f, val centre: Float = .36f) : GlyphSubject
+
+    /** A camera on the end of a cable: plug one in. */
+    data class Camera(val centre: Float = .27f) : GlyphSubject
+
+    /** A word, set large. */
+    data class Word(val text: String, val y0: Float = .46f, val fit: Float = .8f, val font: Float = 96f) : GlyphSubject
 
     /**
-     * A photograph as characters. [revealed] in 0..1 is how far down the
-     * picture has come out; below that line there is only faint noise.
+     * A photograph as characters, each in the colour of the picture under it. [revealed] in 0..1 is
+     * how far down the picture has come out; below that line there is only the faint field.
      */
     class Picture(val bitmap: Bitmap, val revealed: Float = 1f) : GlyphSubject
 }
 
-private var monoFace: Typeface? = null
-private fun mono(context: Context): Typeface = monoFace ?: try {
-    Typeface.createFromAsset(context.assets, "fonts/DejaVuSansMono-Bold.ttf")
-} catch (e: Exception) {
-    Typeface.MONOSPACE
-}.also { monoFace = it }
-
-/** The system setting that turns animations off: honoured by everything here that moves by itself. */
-fun animationsOff(context: Context): Boolean =
-    Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
-
-private fun hash(x: Float, y: Float): Float {
-    val s = sin(x * 127.1f + y * 311.7f) * 43758.547f
-    return s - floor(s)
-}
-
-/** Smooth value noise in 0..1. */
-private fun noise(x: Float, y: Float): Float {
-    val xi = floor(x)
-    val yi = floor(y)
-    val xf = x - xi
-    val yf = y - yi
-    val u = xf * xf * (3 - 2 * xf)
-    val v = yf * yf * (3 - 2 * yf)
-    val a = hash(xi, yi)
-    val b = hash(xi + 1, yi)
-    val c = hash(xi, yi + 1)
-    val d = hash(xi + 1, yi + 1)
-    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v
-}
-
-/** A brightness per cell, [cols] x [rows], and for a picture its colours. */
-private class Field(
-    val cols: Int, val rows: Int, val luma: FloatArray?, val argb: IntArray?,
-    /** A word set in dots: its strokes are one cell thick, so every cell of it is drawn dense and bright. */
-    val solid: Boolean = false,
-)
-
-private fun fieldOf(subject: GlyphSubject, cols: Int, rows: Int, cellW: Float, cellH: Float, face: Typeface): Field {
-    if (cols <= 0 || rows <= 0) return Field(0, 0, null, null)
-    when (subject) {
-        GlyphSubject.Room -> return Field(cols, rows, null, null)
-        is GlyphSubject.Word -> {
-            dotWord(subject.text, cols, rows)?.let { return Field(cols, rows, it, null, solid = true) }
-            // the word drawn small, one pixel per cell
-            val bitmap = Bitmap.createBitmap(cols, rows, Bitmap.Config.ARGB_8888)
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = android.graphics.Color.WHITE
-                typeface = face
-                textAlign = Paint.Align.CENTER
-                // cells are taller than wide: the word is drawn narrow so that it reads true on the grid
-                textScaleX = cellH / cellW
-                textSize = min(rows * 0.62f, cols / (subject.text.length.coerceAtLeast(1) * 0.66f * (cellH / cellW)))
-            }
-            AndroidCanvas(bitmap).drawText(subject.text, cols / 2f, rows * 0.5f - (paint.ascent() + paint.descent()) / 2f, paint)
-            val px = IntArray(cols * rows)
-            bitmap.getPixels(px, 0, cols, 0, 0, cols, rows)
-            bitmap.recycle()
-            return Field(cols, rows, FloatArray(px.size) { (px[it] and 0xff) / 255f }, null)
-        }
-        is GlyphSubject.Picture -> {
-            // the photograph fitted inside the grid, keeping its shape on screen
-            val src = subject.bitmap
-            val gridW = cols * cellW
-            val gridH = rows * cellH
-            val k = min(gridW / src.width, gridH / src.height)
-            val w = (src.width * k / cellW).roundToInt().coerceIn(1, cols)
-            val h = (src.height * k / cellH).roundToInt().coerceIn(1, rows)
-            val small = Bitmap.createScaledBitmap(src, w, h, true)
-            val px = IntArray(w * h)
-            small.getPixels(px, 0, w, 0, 0, w, h)
-            if (small !== src) small.recycle()
-            val luma = FloatArray(cols * rows)
-            val argb = IntArray(cols * rows)
-            val x0 = (cols - w) / 2
-            val y0 = (rows - h) / 2
-            for (y in 0 until h) for (x in 0 until w) {
-                val p = px[y * w + x]
-                val i = (y + y0) * cols + x + x0
-                argb[i] = p or (0xff shl 24)
-                luma[i] = (0.2126f * (p shr 16 and 0xff) + 0.7152f * (p shr 8 and 0xff) + 0.0722f * (p and 0xff)) / 255f
-            }
-            return Field(cols, rows, luma, argb)
-        }
-    }
-}
-
-/**
- * The character matrix.
- *
- * @param cell the height of one character cell
- * @param strength how much of the room's noise shows, 0..1
- * @param ink the colour of a strong character; weak ones are drawn in [faint]
- */
-@Composable
-fun GlyphField(
-    subject: GlyphSubject,
-    modifier: Modifier = Modifier,
-    cell: Dp = 11.dp,
-    strength: Float = 1f,
-    ink: Color = Ink.Faint,
-    faint: Color = Ink.Line,
-    spark: Color = Ink.Text,
-) {
-    val context = LocalContext.current
-    val face = remember { mono(context) }
-    val still = remember { animationsOff(context) }
-    var time by remember { mutableFloatStateOf(0f) }
-    // about twenty pictures a second is plenty for drifting characters
-    LaunchedEffect(still) {
-        if (still) return@LaunchedEffect
-        val start = withFrameNanos { it }
-        var last = 0L
-        while (true) {
-            val now = withFrameNanos { it }
-            if (now - last >= 48_000_000L) {
-                last = now
-                time = (now - start) / 1e9f
-            }
-        }
-    }
-    val paint = remember { Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = face } }
-    var field by remember { mutableStateOf(Field(0, 0, null, null)) }
-    var fieldKey by remember { mutableStateOf<Any?>(null) }
-
-    Canvas(modifier) {
-        val cellH = cell.toPx()
-        paint.textSize = cellH * 0.92f
-        val cellW = paint.measureText("M")
-        val cols = ceil(size.width / cellW).toInt()
-        val rows = ceil(size.height / cellH).toInt()
-        if (cols <= 0 || rows <= 0) return@Canvas
-        val key = Triple(subject, cols, rows)
-        if (key != fieldKey && !(subject is GlyphSubject.Picture && (fieldKey as? Triple<*, *, *>)?.let {
-                (it.first as? GlyphSubject.Picture)?.bitmap === subject.bitmap && it.second == cols && it.third == rows
-            } == true)) {
-            field = fieldOf(subject, cols, rows, cellW, cellH, face)
-        }
-        fieldKey = key
-        val f = field
-        val t = time
-        val baseline = -paint.ascent() * 0.9f
-        val scan = (subject as? GlyphSubject.Picture)?.revealed?.coerceIn(0f, 1f)?.times(rows) ?: 0f
-        val colours = intArrayOf(faint.toArgb(), ink.toArgb(), spark.toArgb())
-        val lines = Array(3) { CharArray(cols) }
-        drawIntoCanvas { canvas ->
-            val native = canvas.nativeCanvas
-            val one = CharArray(1)
-            for (y in 0 until rows) {
-                for (l in lines) l.fill(' ')
-                var any = false
-                for (x in 0 until cols) {
-                    val n = noise(x * 0.09f + t * 0.35f, y * 0.11f - t * 0.22f)
-                    val luma = f.luma
-                    var v: Float
-                    var tone = -1   // -1: decided by how strong the character is
-                    when {
-                        luma == null -> v = n.pow(2.6f) * strength
-                        f.argb != null -> {
-                            // a photograph: revealed above the scan line, faint noise below it
-                            if (y > scan || f.argb[y * cols + x] == 0) {
-                                v = n * 0.14f * strength
-                            } else {
-                                v = 0.22f + luma[y * cols + x] * (0.72f + 0.28f * (hash(x.toFloat(), y + floor(t * 12f)) - 0.5f))
-                                val k = (v * (RAMP.length - 1)).roundToInt().coerceIn(0, RAMP.length - 1)
-                                if (k > 0) {
-                                    one[0] = RAMP[k]
-                                    paint.color = f.argb[y * cols + x]
-                                    native.drawText(one, 0, 1, x * cellW, y * cellH + baseline, paint)
-                                }
-                                continue
-                            }
-                        }
-                        luma[y * cols + x] > 0.5f -> {
-                            val flicker = hash(x + floor(t * 8f), y.toFloat())
-                            v = if (f.solid) 0.8f + 0.2f * flicker else 0.55f + 0.45f * flicker
-                            tone = if (hash(x.toFloat(), y + floor(t * 3f)) > (if (f.solid) 0.15f else 0.82f)) 2 else 1
-                        }
-                        else -> v = n.pow(3f) * 0.5f * strength
-                    }
-                    val k = (v * (RAMP.length - 1)).roundToInt().coerceIn(0, RAMP.length - 1)
-                    if (k == 0) continue
-                    if (tone < 0) tone = if (v > 0.86f && hash(x.toFloat(), y.toFloat()) > 0.7f) 2 else if (k > (RAMP.length - 1) * 0.55f) 1 else 0
-                    lines[tone][x] = RAMP[k]
-                    any = true
-                }
-                if (!any) continue
-                // a monospace face: a whole row of one tone is one call, the gaps are spaces
-                for (tone in 0..2) {
-                    paint.color = colours[tone]
-                    native.drawText(lines[tone], 0, cols, 0f, y * cellH + baseline, paint)
-                }
-            }
-        }
-    }
-}
-
-/** With fewer columns than this to a letter, a drawn letter loses its strokes on the grid. */
-private const val DRAWN_COLS = 9
+/** With fewer cells than this to a letter, a drawn letter loses its strokes on the grid. */
+private const val DRAWN_CELLS = 9
 
 /** A 5 x 7 dot face, capitals and digits: seven rows from the top. */
 private val DOT_FACE: Map<Char, String> = mapOf(
@@ -304,48 +119,317 @@ private val DOT_FACE: Map<Char, String> = mapOf(
 )
 
 /**
- * [text] in the dot face, a cell to a dot (more where whole cells allow), in the middle of the grid. Null when
- * the word is short enough to be drawn as letters, or too long for the grid even at a cell to a dot.
+ * [text] in the dot face, a cell to a dot (more where whole cells allow), on the grid's own lines. False when the
+ * word is short enough to be drawn as letters, or too long for the grid even at a cell to a dot.
  */
-private fun dotWord(text: String, cols: Int, rows: Int): FloatArray? {
+private fun dots(text: String, canvas: AndroidCanvas, w: Int, h: Int, cell: Float, y0: Float, paint: Paint): Boolean {
     val n = text.length
-    if (n == 0 || cols / n >= DRAWN_COLS) return null
+    val cols = (w / cell).toInt()
+    val rows = (h / cell).toInt()
+    if (n == 0 || cols / n >= DRAWN_CELLS) return false
     val wide = n * 6 - 1                       // five dots to a letter and one between
     val k = min(cols / (wide + 2), rows / 9)   // at least a dot of air on every side
-    if (k < 1) return null
-    val luma = FloatArray(cols * rows)
+    if (k < 1) return false
     val x0 = (cols - wide * k) / 2
-    val y0 = (rows - 7 * k) / 2
+    val top = (rows * y0).roundToInt() - 7 * k / 2
     for ((i, ch) in text.withIndex()) {
         val glyph = DOT_FACE[ch.uppercaseChar()] ?: continue
         for (gy in 0 until 7) for (gx in 0 until 5) {
             if (glyph[gy * 6 + gx] != '#') continue   // the rows of a glyph are five dots and a space
-            for (dy in 0 until k) for (dx in 0 until k) {
-                luma[(y0 + gy * k + dy) * cols + x0 + (i * 6 + gx) * k + dx] = 1f
-            }
+            val x = (x0 + (i * 6 + gx) * k) * cell
+            val y = (top + gy * k) * cell
+            canvas.drawRect(x, y, x + k * cell, y + k * cell, paint)
         }
     }
-    return luma
+    return true
 }
 
-private const val LATIN = "ABCDEFGHJKLMNPQRSTUVWXYZ#%*+=<>/"
-private const val DIGITS = "0123456789"
-// the words of a darkroom: a Chinese title settles out of these, so its width never jumps
-private const val HAN = "胶片显影定影冲印曝光潜影银盐相纸底片暗房光圈快门颗粒"
+private var monoFace: Typeface? = null
+internal fun mono(context: Context): Typeface = monoFace ?: try {
+    Typeface.createFromAsset(context.assets, "fonts/DejaVuSansMono-Bold.ttf")
+} catch (e: Exception) {
+    Typeface.MONOSPACE
+}.also { monoFace = it }
 
-private fun stray(c: Char, seed: Int): Char = when {
-    c == ' ' -> ' '
-    c.isDigit() -> DIGITS[seed.mod(DIGITS.length)]
-    c.code > 0x2E80 -> HAN[seed.mod(HAN.length)]
-    c.isLetter() -> LATIN[seed.mod(LATIN.length)]
-    else -> c
+/** Animations are off: the app's own switch, or the system's. Honoured by everything here that moves by itself. */
+fun animationsOff(context: Context): Boolean =
+    context.getSharedPreferences("appearance", Context.MODE_PRIVATE).getBoolean("reduceMotion", false) ||
+        Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+
+/** A number in 0..1 that is the same every time for the same three. */
+private fun chance(x: Int, y: Int, t: Int): Float {
+    var h = x * 374761393 + y * 668265263 + t * 1274126177
+    h = (h xor (h ushr 13)) * 1274126177
+    h = h xor (h ushr 16)
+    return (h and 0xffffff) / 16777216f
+}
+
+/** The shape as a picture of how dense the characters are, one sample to a dp. */
+private class Mask(val w: Int, val h: Int, val alpha: ByteArray, val colour: IntArray? = null, val period: Int = 0, val speed: Float = 0f) {
+    fun at(x: Int, y: Int): Float = if (x < 0 || y < 0 || x >= w || y >= h) 0f else (alpha[y * w + x].toInt() and 0xff) / 255f
+}
+
+private fun maskOf(subject: GlyphSubject, wDp: Int, hDp: Int, cell: Float, bold: Typeface): Mask? {
+    if (wDp <= 0 || hDp <= 0 || subject == GlyphSubject.Room) return null
+    // a strip of film runs past: it is drawn one frame longer than the field, and the frames and the
+    // perforations both repeat exactly in that length, so it can go round without a seam
+    val period = if (subject is GlyphSubject.Film) {
+        val pitch = hDp * subject.frac * .92f + cell * 2.2f
+        (max(1, (pitch / (cell * 2)).roundToInt()) * cell * 2).roundToInt()
+    } else 0
+    val w = wDp + period
+    val bitmap = Bitmap.createBitmap(w, hDp, Bitmap.Config.ARGB_8888)
+    val canvas = AndroidCanvas(bitmap)
+    val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.WHITE }
+    val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.WHITE; style = Paint.Style.STROKE }
+    fun a(v: Float) = (v * 255).roundToInt()
+    var colour: IntArray? = null
+    when (subject) {
+        is GlyphSubject.Film -> {
+            val sh = hDp * subject.frac
+            val top = hDp * subject.centre - sh / 2
+            val hole = cell * 1.1f
+            val pitch = period.toFloat()
+            fill.alpha = a(.07f)
+            canvas.drawRect(0f, top, w.toFloat(), top + sh, fill)
+            fill.alpha = a(.9f)
+            var px = 0f
+            while (px < w) {
+                canvas.drawRect(px, top + cell * 1.2f, px + hole, top + cell * 1.2f + hole, fill)
+                canvas.drawRect(px, top + sh - cell * 1.2f - hole, px + hole, top + sh - cell * 1.2f, fill)
+                px += cell * 2
+            }
+            stroke.strokeWidth = cell * .95f
+            var fx = cell
+            while (fx < w) {
+                fill.alpha = a(.14f)
+                canvas.drawRect(fx, top + cell * 3.6f, fx + pitch - cell * 2.2f, top + sh - cell * 3.6f, fill)
+                stroke.alpha = a(.9f)
+                canvas.drawRect(fx, top + cell * 3.6f, fx + pitch - cell * 2.2f, top + sh - cell * 3.6f, stroke)
+                fx += pitch
+            }
+        }
+        is GlyphSubject.Camera -> {
+            val bw = min(w * .5f, 230f)
+            val bh = bw * .62f
+            val cx = w / 2f
+            val cy = hDp * subject.centre
+            val l = cx - bw / 2
+            val t = cy - bh / 2
+            fill.alpha = a(.12f)
+            canvas.drawRect(l, t, l + bw, t + bh, fill)
+            fill.alpha = 255
+            stroke.strokeWidth = cell * .9f
+            canvas.drawRect(l, t, l + bw, t + bh, stroke)
+            canvas.drawRect(cx - bw * .16f, t - bh * .16f, cx + bw * .16f, t, fill)
+            canvas.drawRect(l + bw * .08f, t - bh * .07f, l + bw * .2f, t, fill)
+            canvas.drawCircle(cx, cy + bh * .04f, bh * .30f, stroke)
+            canvas.drawCircle(cx, cy + bh * .04f, bh * .13f, fill)
+            // the cable, out of the picture at the right
+            canvas.drawPath(AndroidPath().apply {
+                moveTo(l + bw, cy + bh * .2f)
+                cubicTo(l + bw + bw * .28f, cy + bh * .2f, l + bw + bw * .12f, cy + bh * 1.05f, w + 20f, cy + bh * .95f)
+            }, stroke)
+        }
+        is GlyphSubject.Word -> if (!dots(subject.text, canvas, w, hDp, cell, subject.y0, fill)) {
+            fill.typeface = bold
+            fill.textAlign = Paint.Align.CENTER
+            fill.textSize = subject.font
+            val wide = fill.measureText(subject.text)
+            if (wide > w * subject.fit) fill.textSize = floor(subject.font * w * subject.fit / wide)
+            canvas.drawText(subject.text, w / 2f, hDp * subject.y0 - (fill.ascent() + fill.descent()) / 2f, fill)
+        }
+        is GlyphSubject.Picture -> {
+            // the photograph fitted inside the field, keeping its shape
+            val src = subject.bitmap
+            val k = min(w.toFloat() / src.width, hDp.toFloat() / src.height)
+            val pw = max(1, (src.width * k).roundToInt())
+            val ph = max(1, (src.height * k).roundToInt())
+            val left = (w - pw) / 2f
+            val top = (hDp - ph) / 2f
+            canvas.drawBitmap(src, null, android.graphics.RectF(left, top, left + pw, top + ph), Paint(Paint.FILTER_BITMAP_FLAG))
+            colour = IntArray(w * hDp)
+        }
+        GlyphSubject.Room -> Unit
+    }
+    val px = IntArray(w * hDp)
+    bitmap.getPixels(px, 0, w, 0, 0, w, hDp)
+    bitmap.recycle()
+    colour?.let { System.arraycopy(px, 0, it, 0, px.size) }
+    return Mask(w, hDp, ByteArray(px.size) { (px[it] ushr 24).toByte() }, colour, period, if (period > 0) 9f else 0f)
 }
 
 /**
- * Text that arrives: each character runs through a few others before it
- * settles, left to right. It does this once when it first appears and again
- * whenever [text] changes -- an answer to something having changed, never a
- * loop.
+ * The character matrix.
+ *
+ * @param cell the side of one character's cell
+ * @param fps how often the characters change; ten times a second is plenty
+ * @param noise how many of the cells outside the shape hold a faint character, 0..1
+ * @param strength scales how visible all of it is
+ * @param scan whether the line of light passes down it
+ */
+@Composable
+fun GlyphField(
+    subject: GlyphSubject,
+    modifier: Modifier = Modifier,
+    cell: Dp = 8.dp,
+    fps: Int = 10,
+    noise: Float = .10f,
+    strength: Float = 1f,
+    scan: Boolean = true,
+    ink: Color = Color.Unspecified,
+    hot: Color = Color.Unspecified,
+) {
+    val context = LocalContext.current
+    val face = remember { mono(context) }
+    val bold = remember { ResourcesCompat.getFont(context, R.font.heros_bold) ?: Typeface.DEFAULT_BOLD }
+    val still = LocalReducedMotion.current || animationsOff(context)
+    var time by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(still, fps) {
+        if (still) return@LaunchedEffect
+        val start = withFrameNanos { it }
+        var last = 0L
+        val gap = 1_000_000_000L / fps
+        while (true) {
+            val now = withFrameNanos { it }
+            if (now - last >= gap) {
+                last = now
+                time = (now - start) / 1e9f
+            }
+        }
+    }
+    val paint = remember { Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = face; textAlign = Paint.Align.CENTER } }
+    val chars = remember { GLYPHS.toCharArray() }
+    val cache = remember { arrayOfNulls<Any>(2) }      // what the mask was made for, and the mask
+    val dim = if (ink != Color.Unspecified) ink else Ink.Glyph
+    val lit = if (hot != Color.Unspecified) hot else Ink.GlyphHot
+    val light = Ink.light
+
+    Canvas(modifier) {
+        val d = density
+        val wDp = (size.width / d).roundToInt()
+        val hDp = (size.height / d).roundToInt()
+        val c = cell.value
+        if (wDp <= 0 || hDp <= 0) return@Canvas
+        val key = Triple(if (subject is GlyphSubject.Picture) subject.bitmap else subject, wDp, hDp)
+        if (cache[0] != key) {
+            cache[0] = key
+            cache[1] = maskOf(subject, wDp, hDp, c, bold)
+        }
+        val mask = cache[1] as Mask?
+        val cols = ceil(wDp / c).toInt()
+        val rows = ceil(hDp / c).toInt()
+        val t = time
+        val tick = (t * fps).toInt()
+        val line = if (!scan || still) -9999f else (t * 22f) % (hDp + 160f) - 80f
+        val shift = if (mask != null && mask.period > 0) floor((t * mask.speed) % mask.period).toInt() else 0
+        val base = if (light) .10f else .06f
+        val revealed = (subject as? GlyphSubject.Picture)?.revealed?.coerceIn(0f, 1f)
+        paint.textSize = c * d
+        val centre = -(paint.ascent() + paint.descent()) / 2f
+        val dimArgb = dim.toArgb()
+        val litArgb = lit.toArgb()
+        drawIntoCanvas { canvas ->
+            val native = canvas.nativeCanvas
+            for (y in 0 until rows) {
+                val near = abs(y * c - line) < 24f
+                for (x in 0 until cols) {
+                    val sx = min((mask?.w ?: 1) - 1, (x * c + c / 2).toInt() + shift)
+                    val sy = min((mask?.h ?: 1) - 1, (y * c + c / 2).toInt())
+                    var a = mask?.at(sx, sy) ?: 0f
+                    var argb = dimArgb
+                    if (mask?.colour != null) {
+                        // a photograph: its own colours above the line it has come out to, nothing below
+                        if (a > .05f && revealed != null && y <= revealed * rows) {
+                            val p = mask.colour[sy * mask.w + sx]
+                            val luma = (0.2126f * (p shr 16 and 0xff) + 0.7152f * (p shr 8 and 0xff) + 0.0722f * (p and 0xff)) / 255f
+                            argb = p or (0xff shl 24)
+                            a = .3f + .7f * luma
+                        } else a = 0f
+                    }
+                    if (a < .05f && chance(x, y, tick) > noise) continue
+                    var alpha = if (a > .05f) .10f + a * .90f else base + chance(y, x, tick + 7) * .04f
+                    if (near) alpha = min(1f, alpha + .3f)
+                    if (mask?.colour == null) argb = if (a > .58f && near) litArgb else dimArgb
+                    paint.color = argb
+                    paint.alpha = (alpha * strength * (argb ushr 24) / 255f * 255f).roundToInt().coerceIn(0, 255)
+                    val g = (chance(x * 31 + 5, y * 17 + 3, tick) * chars.size).toInt().coerceIn(0, chars.size - 1)
+                    native.drawText(chars, g, 1, (x * c + c / 2) * d, (y * c + c / 2) * d + centre, paint)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The same characters going away along the diagonal, to uncover what is under
+ * them: a photograph that has just arrived. Lay it over the photograph with
+ * the same size; [progress] runs 0..1.
+ */
+@Composable
+fun GlyphVeil(progress: Float, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val face = remember { mono(context) }
+    val paint = remember { Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = face; textAlign = Paint.Align.CENTER } }
+    val chars = remember { GLYPHS.toCharArray() }
+    var tick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        var last = 0L
+        while (true) {
+            val now = withFrameNanos { it }
+            if (now - last > 80_000_000L) {
+                last = now
+                tick++
+            }
+        }
+    }
+    val bg = Ink.Bg2
+    val dim = Ink.Glyph
+    val hot = Ink.GlyphHot
+    Canvas(modifier) {
+        if (progress >= 1f) return@Canvas
+        val cell = max(6.dp.toPx(), (min(size.width, size.height) / 22f))
+        val cols = ceil(size.width / cell).toInt()
+        val rows = ceil(size.height / cell).toInt()
+        val band = .28f
+        paint.textSize = cell
+        val centre = -(paint.ascent() + paint.descent()) / 2f
+        drawIntoCanvas { canvas ->
+            for (y in 0 until rows) for (x in 0 until cols) {
+                val threshold = (x.toFloat() / cols + y.toFloat() / rows) / 2f * (1f - band)
+                val lp = (progress - threshold) / band
+                if (lp >= 1f) continue
+                val keep = if (lp <= 0f) 1f else 1f - lp
+                drawRect(bg.copy(alpha = keep), Offset(x * cell, y * cell), Size(cell + .5f, cell + .5f))
+                paint.color = (if (lp <= 0f) dim else hot).toArgb()
+                paint.alpha = ((if (lp <= 0f) .42f else min(1f, keep + .25f)) * 255).roundToInt()
+                val g = (chance(x, y, tick) * chars.size).toInt().coerceIn(0, chars.size - 1)
+                canvas.nativeCanvas.drawText(chars, g, 1, x * cell + cell / 2, y * cell + cell / 2 + centre, paint)
+            }
+        }
+    }
+}
+
+private const val LATIN = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&$*+=/<>"
+// the words of a darkroom: a Chinese title settles out of these, so its letters keep their width
+private const val HAN = "胶片显影定影冲印曝光潜影银盐相纸底片暗房光圈快门颗粒"
+
+private fun stray(c: Char, seed: Float): Char = when {
+    c == ' ' -> ' '
+    c.code > 0x2E80 -> HAN[(seed * HAN.length).toInt().coerceIn(0, HAN.length - 1)]
+    else -> LATIN[(seed * LATIN.length).toInt().coerceIn(0, LATIN.length - 1)]
+}
+
+/**
+ * Text that settles out of noise: every character starts as some other one,
+ * all of them changing, and they come to rest one by one from the left. It
+ * does this when it first appears and again whenever [text] or [trigger]
+ * changes -- an answer to something having changed, never a loop. Each
+ * character keeps the width it will have, so nothing around it moves.
+ *
+ * @param stagger milliseconds between one character coming to rest and the next
+ * @param delay milliseconds before the first one does
+ * @param hot the colour of a character that has not come to rest yet
  */
 @Composable
 fun ScrambleText(
@@ -353,25 +437,48 @@ fun ScrambleText(
     style: TextStyle,
     modifier: Modifier = Modifier,
     color: Color = Color.Unspecified,
-    stepMs: Long = 34,
+    stagger: Int = 50,
+    delay: Int = 180,
+    hot: Color = Color.Unspecified,
+    trigger: Any? = null,
 ) {
     val context = LocalContext.current
-    var shown by remember { mutableStateOf(text) }
-    LaunchedEffect(text) {
-        if (animationsOff(context) || text.isEmpty()) {
-            shown = text
+    val reduced = LocalReducedMotion.current
+    val measurer = rememberTextMeasurer(cacheSize = 96)
+    val drawn = if (color != Color.Unspecified) style.copy(color = color) else style
+    val slots = remember(text, drawn) { text.map { measurer.measure(it.toString(), drawn) } }
+    var elapsed by remember { mutableFloatStateOf(Float.MAX_VALUE) }
+    LaunchedEffect(text, trigger) {
+        if (reduced || animationsOff(context) || text.isBlank()) {
+            elapsed = Float.MAX_VALUE
             return@LaunchedEffect
         }
-        // each character settles a little after the one before it; all of it is over in under half a second
-        val steps = (text.length + 5).coerceAtMost(13)
-        for (step in 0..steps) {
-            val settled = (step.toFloat() / steps * (text.length + 1)).toInt() - 1
-            shown = buildString(text.length) {
-                text.forEachIndexed { i, c -> append(if (i <= settled) c else stray(c, i * 31 + step * 17 + text.length)) }
-            }
-            delay(stepMs)
-        }
-        shown = text
+        val start = withFrameNanos { it }
+        val total = delay + stagger * text.length
+        elapsed = 0f
+        while (elapsed < total) elapsed = (withFrameNanos { it } - start) / 1e6f
+        elapsed = Float.MAX_VALUE
     }
-    Txt(shown, style, modifier, color = color)
+    val width = slots.sumOf { it.size.width }
+    val height = slots.maxOfOrNull { it.size.height } ?: 0
+    val unsettled = if (hot != Color.Unspecified) drawn.copy(color = hot) else drawn
+    Canvas(
+        modifier
+            .semantics { contentDescription = text }
+            .layout { measurable, _ ->
+                val p = measurable.measure(androidx.compose.ui.unit.Constraints.fixed(width, height))
+                layout(width, height) { p.place(0, 0) }
+            },
+    ) {
+        var x = 0f
+        val roll = floor(elapsed / 42f).toInt()
+        for ((i, slot) in slots.withIndex()) {
+            val c = text[i]
+            val settled = elapsed >= delay + i * stagger || c == ' '
+            val result: TextLayoutResult =
+                if (settled) slot else measurer.measure(stray(c, chance(i, 11, roll)).toString(), unsettled)
+            drawText(result, topLeft = Offset(x + (slot.size.width - result.size.width) / 2f, 0f))
+            x += slot.size.width
+        }
+    }
 }

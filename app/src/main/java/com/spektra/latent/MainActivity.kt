@@ -1,6 +1,8 @@
 package com.spektra.latent
 
 import android.content.Intent
+import android.content.res.Configuration
+import android.graphics.drawable.ColorDrawable
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
@@ -10,7 +12,9 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.mutableStateOf
+import com.spektra.latent.ui.Ink
 import com.spektra.latent.ui.Root
+import com.spektra.latent.ui.ThemeMode
 
 class MainActivity : ComponentActivity() {
     /** Pictures another app handed over, waiting for the library to take them. */
@@ -22,6 +26,10 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
+        // the theme the person chose stands from the first frame: no dark flash before a light screen
+        val night = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        Ink.light = ThemeMode.saved(this).light(night)
+        window.setBackgroundDrawable(ColorDrawable(if (Ink.light) 0xFFEDE7DA.toInt() else 0xFF08080A.toInt()))
         if (savedInstanceState == null) take(intent)
         setContent {
             Root(app = application as LatentApp, incoming = incoming.value, onIncomingTaken = { incoming.value = emptyList() })

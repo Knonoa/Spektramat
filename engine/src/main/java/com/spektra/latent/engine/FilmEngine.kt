@@ -173,6 +173,17 @@ class Rebate(
     /** Nothing of this reaches the negative. */
     val idle: Boolean get() = !edge && !(date && (dateText.isNotEmpty() || dataText.isNotEmpty()))
 
+    fun dateBounds(width:Int,height:Int,longMm:Float):FloatArray =
+        Native.proofDateBounds(width,height,longMm,strings(),numbers()) ?: floatArrayOf()
+
+    fun pictureGate(width:Int,height:Int):FloatArray =
+        Native.proofGate(width,height,strings(),numbers()) ?: floatArrayOf(0f,0f,1f,0f,1f,1f,0f,1f)
+
+    /** Source crop (LTRB), then the source's TL/TR/BR/BL in normalized print coordinates.
+     * Unlike pictureGate this is neither inset for metering nor ordered along the film. */
+    fun pictureSource(width:Int,height:Int):FloatArray =
+        Native.proofSource(width,height,strings(),numbers()) ?: floatArrayOf(0f,0f,1f,1f,0f,0f,1f,0f,1f,1f,0f,1f)
+
     internal fun strings(): Array<String> =
         arrayOf(format, mode, gate, holes, edgeText, dateStyle, dateText, dataText, datePlacement, dateCorner)
 
@@ -330,6 +341,16 @@ object FilmEngine {
     fun display(image: LinearImage): Bitmap {
         val out = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
         Native.display(image.id, out)?.let { throw IOException(it) }
+        return out
+    }
+
+    /** The source with scene and finishing adjustments, with no film or paper simulation. */
+    fun adjustPhoto(image: LinearImage, grade: FloatArray, finish: FloatArray, finishTable: FloatArray): Bitmap {
+        val out = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
+        Native.adjustPhoto(image.id, grade, finish, finishTable, out)?.let {
+            out.recycle()
+            throw IOException(it)
+        }
         return out
     }
 

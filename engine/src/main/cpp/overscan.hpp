@@ -160,6 +160,11 @@ void overscan_imprints(const OverscanLayout& L, const OverscanParams& o, const D
                        const std::string& stock, double frame_w_mm, double frame_h_mm,
                        const FontLib* fonts, float* const planes[3]);
 
+// Read-only bounds of the date/data masks, in normalised canvas coordinates.
+// The UI uses the same rasterised marks to leave the date clear above its histogram.
+bool overscan_date_bounds(const OverscanLayout& L, const OverscanParams& o, const DateImprintParams& d,
+                          double frame_w_mm, double frame_h_mm, float bounds[4]);
+
 // (4): on the developed negative, where there is no film the density goes to
 // the cmy that cancels the base.
 void overscan_film_present(const OverscanLayout& L, float* const cmy[3]);

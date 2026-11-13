@@ -1,51 +1,47 @@
 package com.spektra.latent.ui.darkroom
 
-import android.graphics.SurfaceTexture
-import android.view.TextureView
-import androidx.compose.animation.AnimatedVisibility
+import android.graphics.Bitmap
+import android.os.Build
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.spektra.latent.APP_NAME
-import com.spektra.latent.data.Recipes
-import com.spektra.latent.data.PrintFormat
-import com.spektra.latent.model.Aspects
-import com.spektra.latent.model.Format
-import com.spektra.latent.ui.TextEntry
-import com.spektra.latent.ui.PrintFormatPicker
-import kotlinx.coroutines.launch
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -53,337 +49,383 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.spektra.latent.APP_NAME
+import com.spektra.latent.data.Frame
 import com.spektra.latent.data.Library
+import com.spektra.latent.data.PrintDesk
+import com.spektra.latent.data.PrintFormat
+import com.spektra.latent.data.PrintJob
+import com.spektra.latent.data.Recipes
 import com.spektra.latent.engine.FilmEngine
-import com.spektra.latent.model.Control
-import com.spektra.latent.model.Controls
+import com.spektra.latent.model.Format
 import com.spektra.latent.model.Look
+import com.spektra.latent.ui.Btn
+import com.spektra.latent.ui.BtnKind
+import com.spektra.latent.ui.BtnSize
+import com.spektra.latent.ui.Ctl
+import com.spektra.latent.ui.CtlColumn
 import com.spektra.latent.ui.FileImage
+import com.spektra.latent.ui.GAP
 import com.spektra.latent.ui.Gap
+import com.spektra.latent.ui.GlassPage
+import com.spektra.latent.ui.GlassTone
 import com.spektra.latent.ui.Glyph
+import com.spektra.latent.ui.GlyphVeil
 import com.spektra.latent.ui.Hairline
+import com.spektra.latent.ui.Icon
 import com.spektra.latent.ui.IconButton
 import com.spektra.latent.ui.Ink
-import com.spektra.latent.ui.ParamChip
-import com.spektra.latent.ui.Pill
-import com.spektra.latent.ui.Ruler
+import com.spektra.latent.ui.Lamp
+import com.spektra.latent.ui.LampState
+import com.spektra.latent.ui.LocalOverlays
+import com.spektra.latent.ui.LocalReducedMotion
+import com.spektra.latent.ui.LocalShell
+import com.spektra.latent.ui.Motion
+import com.spektra.latent.ui.Opt
+import com.spektra.latent.ui.PrintFormatPicker
+import com.spektra.latent.ui.Seg
+import com.spektra.latent.ui.SegStyle
 import com.spektra.latent.ui.Sheet
-import com.spektra.latent.ui.Stock
-import com.spektra.latent.ui.StockStrip
-import com.spektra.latent.ui.filmStocks
-import com.spektra.latent.ui.shortName
+import com.spektra.latent.ui.TextEntry
+import com.spektra.latent.ui.TopBar
 import com.spektra.latent.ui.Txt
+import com.spektra.latent.ui.ambientOf
 import com.spektra.latent.ui.Type
-import com.spektra.latent.ui.pressable
+import com.spektra.latent.ui.bottomInset
+import com.spektra.latent.ui.glass
+import com.spektra.latent.ui.leftInset
+import com.spektra.latent.ui.rightInset
+import com.spektra.latent.ui.shortName
+import com.spektra.latent.ui.softShadow
+import com.spektra.latent.ui.topInset
+import kotlinx.coroutines.launch
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** The places a look can be changed, in the order light passes them; the last is the finished print itself. */
-private enum class Stage(val title: String) { Scene("原片"), Film("胶片"), Edge("片边"), Print("印相"), Finish("整饰") }
+/** The places a look can be changed, from scene corrections to the film and enlarger. */
+private enum class Step(val title: String) { Tone("调节"), Film("胶片"), Texture("质感"), Print("放大机"), Edge("片边") }
 
 /**
- * The darkroom: the photograph above, and below it the three stages of the
- * process -- scene, film, print -- each with its own controls. One ruler at
- * the bottom sets whichever control is selected.
+ * The darkroom: what the lab's workbench shows once there is a photograph on
+ * it. The photograph stands in the upper part of the screen with the
+ * histogram over its foot; under it a strip of the photographs on the bench,
+ * and a tray of glass holding the five steps of the process, each with its
+ * settings as rows.
+ *
+ * Hold the photograph to see it as it came, without the film; double-tap or
+ * pinch to look closer. Printing plays the six steps of the print desk over
+ * the photograph, and the strip under it becomes one progress bar.
+ *
+ * @param frames the photographs on the bench, newest first
+ * @param fresh this photograph has only just arrived: it develops into view
+ * @param tabs the lab's tabs, for the top capsule
  */
 @Composable
-fun DarkroomScreen(library: Library, recipes: Recipes, frameId: Long, onBack: () -> Unit, onDevelop: (Look, Int, PrintFormat) -> Unit) {
+fun Darkroom(
+    library: Library,
+    recipes: Recipes,
+    prints: PrintDesk,
+    frame: Frame,
+    frames: List<Frame>,
+    fresh: Boolean,
+    onArrived: () -> Unit,
+    onFrame: (Long) -> Unit,
+    onImport: () -> Unit,
+    onRemove: (Long) -> Unit,
+    tabs: @Composable () -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val frame = remember(frameId) { library.frame(frameId) }
-    if (frame == null) {
-        LaunchedEffect(Unit) { onBack() }
-        return
-    }
-    val state = remember(frameId) { DarkroomState(context, library, frame, scope) }
-    DisposableEffect(state) { onDispose { state.dispose() } }
-
+    val shell = LocalShell.current
+    val overlays = LocalOverlays.current
     val density = LocalDensity.current
-    var view by remember { mutableStateOf(IntSize.Zero) }
-    var topBar by remember { mutableIntStateOf(0) }
-    var panel by remember { mutableIntStateOf(0) }
-    var stage by remember { mutableStateOf(Stage.Film) }
-    // which control each stage last had under the ruler; -1 is the stock / paper picker
-    var sceneAt by remember { mutableIntStateOf(0) }
-    var filmAt by remember { mutableIntStateOf(-1) }
-    var printAt by remember { mutableIntStateOf(-1) }
-    var ordering by remember { mutableStateOf(false) }
-    var printFormat by remember { mutableStateOf(PrintFormat.AUTO) }
-    var recipesOpen by remember { mutableStateOf(false) }
-    var recipeName by remember { mutableStateOf("") }
-    val saved by recipes.all.collectAsStateWithLifecycle()
+    val reduced = LocalReducedMotion.current
+    val prefs = remember { context.getSharedPreferences("appearance", 0) }
 
-    LaunchedEffect(view, topBar, panel) {
-        if (view.width > 0 && panel > 0) {
-            val margin = with(density) { 12.dp.toPx() }
-            state.layout(view.width.toFloat(), view.height.toFloat(), topBar + margin, panel + margin)
+    var step by remember {
+        mutableStateOf(when (val stored = prefs.getString("step", "Film")) {
+            "Date" -> Step.Edge
+            "Finish" -> Step.Tone
+            else -> runCatching { Step.valueOf(stored ?: "Film") }.getOrDefault(Step.Film)
+        })
+    }
+    val state = remember(frame.id) { DarkroomState(context, library, frame, scope, initialAdjustmentsOnly = step == Step.Tone) }
+    DisposableEffect(state) { onDispose { state.dispose() } }
+    var collapsed by remember { mutableStateOf(false) }
+    var histogram by remember { mutableStateOf(prefs.getBoolean("histogram", true)) }
+    var ordering by remember { mutableStateOf(false) }
+    var keeping by remember { mutableStateOf(false) }
+    val saved by recipes.all.collectAsStateWithLifecycle()
+    BackHandler(enabled = collapsed) { collapsed = false }
+
+    // ---- a print of this photograph, and the run that shows it being made
+    var job by remember(frame.id) { mutableStateOf<PrintJob?>(null) }
+    val run = rememberPrintRun(job)
+    val printing = job != null && run != null && !run.over
+    LaunchedEffect(state, step, printing) { state.showAdjustmentsOnly(step == Step.Tone && !printing) }
+    LaunchedEffect(run?.over) {
+        val done = job
+        if (run != null && run.over && done != null) {
+            if (run.failed == null) overlays?.toast("已存入相册", "${done.longEdge} px")
+            job = null
+        }
+    }
+    // a photograph that has just arrived comes out of the characters
+    val veil = remember(frame.id) { Animatable(if (fresh) 0f else 1f) }
+    LaunchedEffect(frame.id, fresh) {
+        if (fresh) {
+            if (!reduced) veil.animateTo(1f, tween(900, easing = LinearEasing)) else veil.snapTo(1f)
+            onArrived()
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Ink.Curtain).onSizeChanged { view = it }) {
-        // ---- the picture: one GPU surface under everything
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                TextureView(ctx).apply {
-                    isOpaque = true
-                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                        override fun onSurfaceTextureAvailable(s: SurfaceTexture, w: Int, h: Int) = state.preview.attach(s, w, h)
-                        override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) = state.preview.resize(w, h)
-                        override fun onSurfaceTextureDestroyed(s: SurfaceTexture): Boolean {
-                            state.preview.detach()
-                            return true
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val top = topInset()
+        val safe = bottomInset()
+        val safeLeft = leftInset()
+        val safeRight = rightInset()
+        val contentWidth = (maxWidth - shell.insetLeft - safeLeft - safeRight).coerceAtLeast(0.dp)
+        val wide = contentWidth >= 840.dp || maxWidth > maxHeight
+        val trayWidth = (contentWidth * .38f).coerceIn(minOf(240.dp, contentWidth * .45f), 396.dp)
+        val trayHeight by animateDpAsState(
+            if (collapsed) 84.dp else min(maxHeight.value * .43f, 396f).dp,
+            tween(if (reduced) 0 else 500, easing = Motion.Ease), label = "tray",
+        )
+        // what is left for the photograph and the strip under it
+        val stageBottom = if (wide) safe else trayHeight + 14.dp + safe
+        val stageRight = if (wide && !collapsed) trayWidth + 20.dp else 0.dp
+        val side = if (wide) 12.dp else 16.dp
+        val footBottom = if (wide) 14.dp else 2.dp
+        val stageTop = if (collapsed) WindowInsets.safeDrawing.asPaddingValues().calculateTopPadding() + 8.dp else top + 2.dp
+        val stageFoot = if (collapsed) 8.dp else footBottom + 58.dp
+        val proof = state.proof
+
+        GlassPage(
+            behind = {
+                Box(Modifier.fillMaxSize().background(Ink.Bg))
+                // the photograph's own light, spilled under the tray so that the glass has something to hold
+                Ambient(
+                    proof,
+                    if (wide) Modifier.align(Alignment.CenterEnd).width(trayWidth + 120.dp).fillMaxHeight()
+                    else Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(trayHeight + 90.dp + safe),
+                    sideways = wide,
+                )
+                PhotoStage(
+                    state, frame, histogram, printing, run, veil.value, collapsed,
+                    onExpand = { collapsed = !collapsed },
+                    onRemove = {
+                        state.commit()
+                        overlays?.toast("已从工作台移除，原图和项目均已保留")
+                        onRemove(frame.id)
+                    },
+                    modifier = Modifier
+                        .padding(
+                            start = shell.insetLeft + safeLeft + side, end = safeRight + stageRight + side,
+                            top = stageTop, bottom = stageBottom + stageFoot,
+                        )
+                        .fillMaxSize(),
+                )
+            },
+            chrome = {
+                state.failure?.let {
+                    Txt(it, Type.body, Modifier.align(Alignment.Center).padding(32.dp), color = Ink.Dim, maxLines = 4)
+                }
+                if (!collapsed) TopBar(
+                    tabs = tabs,
+                    actions = {
+                        IconButton(Glyph.Histogram, if (histogram) "隐藏直方图" else "显示直方图", {
+                            histogram = !histogram
+                            prefs.edit().putBoolean("histogram", histogram).apply()
+                        }, on = histogram)
+                        Btn("冲印", { ordering = true }, Modifier.padding(horizontal = 2.dp), BtnKind.Key, BtnSize.Bar, enabled = state.ready && !printing)
+                    },
+                )
+
+                // ---- under the photograph: the bench, and what this photograph is; while a print runs, its progress
+                if (!collapsed) Box(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = shell.insetLeft + safeLeft + side, end = safeRight + stageRight + side, bottom = stageBottom + footBottom)
+                        .fillMaxWidth()
+                        .height(50.dp),
+                ) {
+                    val bar by animateFloatAsState(if (printing) 1f else 0f, tween(if (reduced) 0 else 300, easing = Motion.Ease), label = "bar")
+                    if (bar < 1f) Foot(state, frame, frames, onFrame, onImport, Modifier.fillMaxSize().graphicsLayer { alpha = 1f - bar })
+                    if (bar > 0f && run != null) PrintBar(run, Modifier.fillMaxSize().graphicsLayer { alpha = bar })
+                }
+
+                // ---- the tray: the steps, and the settings of the step that is open
+                val body = remember(step) { ScrollState(0) }
+                val rail = rememberScrollState()
+                if (!wide || !collapsed) Box(
+                    (if (wide) Modifier.align(Alignment.TopEnd).padding(top = top, end = GAP + safeRight, bottom = GAP + safe).width(trayWidth).fillMaxHeight()
+                    else Modifier.align(Alignment.BottomCenter).padding(start = 8.dp + safeLeft, end = 8.dp + safeRight, bottom = 8.dp + safe).fillMaxWidth().height(trayHeight))
+                        .graphicsLayer { alpha = if (printing) .5f else 1f }
+                        .glass(28.dp, GlassTone.Strong)
+                        .pointerInput(Unit) { },
+                ) {
+                    Column(Modifier.fillMaxSize()) {
+                        if (!wide) Grab(collapsed) { collapsed = !collapsed }
+                        Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 4.dp, bottom = 10.dp, top = if (wide) 10.dp else 0.dp), verticalAlignment = Alignment.CenterVertically) {
+                            var viewport by remember { mutableStateOf(0) }
+                            Box(
+                                Modifier
+                                    .weight(1f)
+                                    .clip(CircleShape)
+                                    // the row of steps fades out at the right: there are more than fit
+                                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                                    .drawWithContent {
+                                        viewport = size.width.toInt()
+                                        drawContent()
+                                        drawRect(
+                                            Brush.horizontalGradient(0f to Color.Black, 1f to Color.Transparent, startX = size.width - 26.dp.toPx(), endX = size.width),
+                                            blendMode = BlendMode.DstIn,
+                                        )
+                                    }
+                                    .horizontalScroll(rail),
+                            ) {
+                                Seg(
+                                    Step.entries.map { Opt(it.name, it.title) }, step.name,
+                                    {
+                                        step = Step.valueOf(it)
+                                        collapsed = false
+                                        prefs.edit().putString("step", it).apply()
+                                    },
+                                    style = SegStyle.Steps,
+                                    // keep the chosen step in view inside its rail
+                                    onChosenAt = { chosen -> scope.launch { rail.animateScrollTo((chosen.center.x - viewport / 2f).roundToInt().coerceAtLeast(0)) } },
+                                )
+                            }
+                            IconButton(Glyph.Undo, "撤销", state::undo, enabled = state.canUndo, size = 40.dp)
+                            IconButton(Glyph.Redo, "重做", state::redo, enabled = state.canRedo, size = 40.dp)
                         }
-                        override fun onSurfaceTextureUpdated(s: SurfaceTexture) = Unit
+                        Hairline()
+                        Column(Modifier.weight(1f).verticalScroll(body).padding(start = TRAY_PAD, end = TRAY_PAD, top = 2.dp, bottom = 20.dp)) {
+                            CtlColumn(Modifier.fillMaxWidth()) {
+                                when (step) {
+                                    Step.Tone -> TonePanel(state)
+                                    Step.Film -> FilmPanel(state, frame, saved, onKeep = { keeping = true })
+                                    Step.Texture -> TexturePanel(state)
+                                    Step.Print -> PrintPanel(state, frame)
+                                    Step.Edge -> EdgePanel(state, state.shooting)
+                                }
+                            }
+                        }
                     }
+                    // while a print runs the settings are not to be touched
+                    if (printing) Box(Modifier.fillMaxSize().pointerInput(Unit) { })
                 }
             },
         )
+    }
 
-        // until the GPU has drawn it, the thumbnail stands in the same place
-        if (view.width > 0) {
-            val shown = state.shownSize
-            val r = state.placement.rect(view.width.toFloat(), view.height.toFloat(), shown[0], shown[1])
-            AnimatedVisibility(!state.ready && !state.comparing, enter = fadeIn(tween(0)), exit = fadeOut(tween(260))) {
-                FileImage(
-                    frame.thumb,
-                    Modifier
-                        .offset { IntOffset(r[0].roundToInt(), r[1].roundToInt()) }
-                        .size(with(density) { r[2].toDp() }, with(density) { r[3].toDp() }),
-                    scale = ContentScale.Fit,
-                )
-            }
-            // the edge of the film and the date are the engine's work: its proof stands where the GPU picture was
-            val proof = state.proof
-            if (proof != null && !state.comparing) {
-                Box(Modifier.fillMaxSize().background(Ink.Curtain))
-                Image(
-                    bitmap = proof, contentDescription = null,
-                    modifier = Modifier
-                        .offset { IntOffset(r[0].roundToInt(), r[1].roundToInt()) }
-                        .size(with(density) { r[2].toDp() }, with(density) { r[3].toDp() }),
-                    contentScale = ContentScale.FillBounds,
-                )
-            }
-        }
-
-        // ---- gestures on the picture: pinch and drag, double-tap to zoom, hold to see it without the film
-        Box(
-            Modifier
-                .fillMaxSize()
-                .pointerInput(state) {
-                    detectTransformGestures { centroid, pan, zoom, _ -> state.transform(centroid, pan, zoom) }
-                }
-                .pointerInput(state) {
-                    detectTapGestures(
-                        onDoubleTap = { state.toggleZoom(it) },
-                        onLongPress = { state.compare(true) },
-                        onPress = {
-                            tryAwaitRelease()
-                            state.compare(false)
-                        },
-                    )
+    // ---- ordering a print
+    val native = state.look.frameSize(frame.width, frame.height).max()
+    val wanted = prefs.getInt("exportEdge", 3072).coerceAtMost(native)
+    val sizes = remember(native, wanted) { (listOf(2048, 3072, 4096).filter { it < native } + wanted + native).distinct().sorted() }
+    var edge by remember(frame.id, wanted) { mutableStateOf(wanted) }
+    var format by remember { mutableStateOf(PrintFormat.AUTO) }
+    Sheet(
+        ordering, { ordering = false }, title = "冲印",
+        foot = {
+            Btn("冲印这一张", {
+                ordering = false
+                state.commit()
+                state.compare(false)
+                state.fit()
+                library.frame(frame.id)?.let { job = prints.order(it, state.look, edge, format) }
+            }, Modifier.weight(1f), BtnKind.Key)
+        },
+    ) {
+        CtlColumn(Modifier.fillMaxWidth()) {
+            Ctl(
+                "长边", value = "像素",
+                note = when {
+                    state.look.edge.on && state.look.edge.open -> "片门全开，成片就是画面本身的大小。"
+                    state.look.edge.on -> "尺寸指画面本身；开着片边，成片会比它大出一圈胶片。"
+                    else -> "冲印在后台进行，离开这里也会做完；成片存进相册的 ${APP_NAME} 相簿。"
                 },
-        )
-
-        val tag = when {
-            state.comparing -> "原片"
-            state.proofing -> "正在出样张"
-            state.proof != null -> "样张 · 颗粒与细节以成片为准"
-            else -> null
-        }
-        if (tag != null) {
-            Box(
-                Modifier
-                    .align(Alignment.TopCenter)
-                    .statusBarsPadding()
-                    .padding(top = 64.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(Ink.Body.copy(alpha = 0.8f))
-                    .padding(horizontal = 12.dp, vertical = 5.dp),
             ) {
-                Txt(tag, Type.caption, color = Ink.Text)
+                Seg(sizes.map { Opt(it.toString(), if (it == native) "原尺寸" else it.toString()) }, edge.toString(), { edge = it.toInt() }, Modifier.fillMaxWidth(), block = true)
             }
+            Ctl("文件") { PrintFormatPicker(format) { format = it } }
         }
-        state.failure?.let {
-            Txt(it, Type.body, Modifier.align(Alignment.Center).padding(32.dp), color = Ink.Dim, maxLines = 4)
-        }
+    }
 
-        // ---- top bar
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .onSizeChanged { topBar = it.height }   // status bar inset included: the picture stays clear of both
-                .statusBarsPadding()
-                .height(56.dp)
-                .padding(horizontal = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(Glyph.Back, "回到片库", onBack)
-            Column(Modifier.weight(1f).padding(start = 4.dp)) {
-                Txt(FilmEngine.catalog.film(state.look.film)?.name ?: state.look.film, Type.edge)
-                Txt("${frame.number}  ${frame.name}", Type.edgeSmall)
-            }
-            IconButton(Glyph.Undo, "撤销", state::undo, enabled = state.canUndo)
-            IconButton(Glyph.Redo, "重做", state::redo, enabled = state.canRedo)
-            IconButton(Glyph.Recipe, "配方", { recipesOpen = true })
-            Gap(width = 2.dp)
-            Pill("冲印", { ordering = true }, filled = true, enabled = state.ready)
-            Gap(width = 8.dp)
-        }
-        // ---- the bench: stages, the stage's controls, the ruler
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .background(Ink.Body)
-                .onSizeChanged { panel = it.height }
-                .navigationBarsPadding(),
-        ) {
-            StageTabs(stage) { stage = it }
-            Hairline(Modifier.fillMaxWidth())
-            when (stage) {
-                Stage.Scene -> ControlBench(
-                    state, Controls.scene, sceneAt, { sceneAt = it },
-                    pickers = listOf(
-                        Picker("画幅", Aspects.label(state.look.aspect), state.look.aspect.isNotEmpty()) {
-                            StockStrip(
-                                items = Aspects.all.map { Stock(it.id, Aspects.label(it.id), it.note) },
-                                selected = state.look.aspect,
-                                onPick = { state.change(state.look.copy(aspect = it)); state.commit() },
-                            )
-                        },
-                    ),
-                    first = 0,
-                )
-                Stage.Film -> ControlBench(
-                    state, Controls.film, filmAt, { filmAt = it },
-                    pickers = listOf(
-                        Picker("型号", shortName(FilmEngine.catalog.film(state.look.film)?.name ?: "")) {
-                            StockStrip(
-                                items = filmStocks(),
-                                selected = state.look.film,
-                                onPick = { state.change(state.look.withFilm(it)); state.commit() },
-                            )
-                        },
-                        // how large the frame is on the film: grain and halation are sized by it, and the edge follows it
-                        Picker("片幅", Format.of(state.look.format).label, state.look.format != "135") {
-                            StockStrip(
-                                items = Format.entries.map { Stock(it.id, it.label, "长边 ${it.longMm.roundToInt()} mm") },
-                                selected = state.look.format,
-                                onPick = { state.change(state.look.copy(format = it)); state.commit() },
-                            )
-                        },
-                    ),
-                )
-                Stage.Edge -> EdgeBench(state.look, state.shooting, state::change, state::commit)
-                Stage.Finish -> FinishBench(state)
-                Stage.Print -> if (FilmEngine.catalog.film(state.look.film)?.positive == true) {
-                    Box(Modifier.fillMaxWidth().height(BENCH_HEIGHT), contentAlignment = Alignment.Center) {
-                        Txt("反转片不用印相：冲出来的胶片本身就是成片。", Type.label, color = Ink.Dim, maxLines = 2)
-                    }
-                } else {
-                    ControlBench(
-                        // looked at directly there is no enlarger and no paper: nothing here but the choice itself
-                        state, if (state.look.scan) emptyList() else Controls.print, printAt, { printAt = it },
-                        pickers = listOf(
-                            Picker("相纸", if (state.look.scan) "直接扫描" else shortName(FilmEngine.catalog.paper(state.look.paper)?.name ?: ""), state.look.scan) {
-                                StockStrip(
-                                    items = listOf(Stock(SCAN, "直接扫描", "不经相纸，看底片本身")) + FilmEngine.catalog.papers.map {
-                                        Stock(it.id, it.name, if (it.blackAndWhite) "黑白相纸" else if (it.cine) "电影拷贝片" else "彩色相纸")
-                                    },
-                                    selected = if (state.look.scan) SCAN else state.look.paper,
-                                    onPick = {
-                                        state.change(if (it == SCAN) state.look.copy(scan = true) else state.look.copy(scan = false, paper = it))
-                                        state.commit()
-                                    },
-                                )
-                            },
-                        ),
-                    )
-                }
-            }
-        }
-
-        // ---- ordering a print
-        Sheet(ordering, { ordering = false }) {
-            Txt("冲印这张照片", Type.heading)
-            Gap(height = 4.dp)
-            Txt("冲印在后台进行，不耽误继续调整；成片保存到相册的 ${APP_NAME} 相簿。尺寸是长边的像素数。", Type.label, color = Ink.Dim, maxLines = 3)
-            Gap(height = 14.dp)
-            PrintFormatPicker(printFormat) { printFormat = it }
-            Gap(height = 14.dp)
-            val native = state.look.frameSize(frame.width, frame.height).max()
-            val sizes = listOf(2048, 3072, 4096).filter { it < native } + native
-            for (edge in sizes) {
-                Row(
-                    Modifier.fillMaxWidth().pressable { ordering = false; state.commit(); onDevelop(state.look, edge, printFormat) }.padding(vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Txt("$edge", Type.edgeLarge, Modifier.width(88.dp))
-                    Txt(if (edge == native) "原尺寸" else if (edge <= 2048) "适合手机上看和分享" else "适合大屏和小幅打印", Type.label, color = Ink.Dim)
-                }
-            }
-            if (state.look.edge.on) {
-                Gap(height = 6.dp)
-                Txt(
-                    if (state.look.edge.open) "片门全开，成片就是画面本身的大小。" else "尺寸指画面本身；开着片边，成片会比它大出一圈胶片。",
-                    Type.caption, maxLines = 2,
-                )
-            }
-        }
-
-        // ---- recipes: this look kept under a name, or a kept one put on this photograph
-        Sheet(recipesOpen, { recipesOpen = false }) {
-            Txt("配方", Type.heading)
-            Gap(height = 4.dp)
-            Txt("配方记下胶片、片边、日期、印相和整饰，可以用在别的照片、相机和监视器上。这张照片自己的校正（原片一栏）不进配方。", Type.label, color = Ink.Dim, maxLines = 4)
-            Gap(height = 14.dp)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val keep = {
-                    val name = recipeName
-                    recipeName = ""
+    // ---- recipes: this look kept under a name; a kept one is put on from the row of chips
+    var name by remember { mutableStateOf("") }
+    Sheet(keeping, { keeping = false }, title = "配方") {
+        Txt(
+            "配方记下胶片、质感、放大机、片边、日期以及曲线等风格设置，可以用在别的照片、相机和监视器上。曝光、白平衡等照片校正单独保留。",
+            Type.micro.copy(lineHeight = 17.6.sp), color = Ink.GlassDim, maxLines = 4,
+        )
+        Gap(height = 14.dp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val keep = {
+                val label = name.trim()
+                if (label.isNotEmpty()) {
+                    name = ""
                     state.commit()
                     val look = state.look
-                    scope.launch { recipes.save(name, look) }
-                    Unit
+                    scope.launch { recipes.save(label, look) }
+                    overlays?.toast("已存为配方", label)
                 }
-                TextEntry(recipeName, { recipeName = it }, "给现在的设置起个名字", keep, Modifier.weight(1f))
-                Gap(width = 10.dp)
-                Pill("保存", keep, filled = true, enabled = recipeName.isNotBlank())
             }
-            Gap(height = 10.dp)
-            Column(Modifier.fillMaxWidth().heightIn(max = 280.dp).verticalScroll(rememberScrollState())) {
-                if (saved.isEmpty()) Txt("还没有配方。", Type.label, Modifier.padding(vertical = 14.dp), color = Ink.Faint)
-                for (r in saved) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(
-                            Modifier.weight(1f).pressable {
-                                recipesOpen = false
+            TextEntry(name, { name = it }, "给现在的设置起个名字", keep, Modifier.weight(1f))
+            Gap(width = 10.dp)
+            Btn("保存", keep, kind = BtnKind.Key, enabled = name.isNotBlank())
+        }
+        Gap(height = 10.dp)
+        if (saved.isEmpty()) Txt("还没有配方。", Type.label, Modifier.padding(vertical = 14.dp), color = Ink.Faint)
+        CtlColumn(Modifier.fillMaxWidth()) {
+            for (r in saved) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(
+                        Modifier.weight(1f)
+                            .clickable(remember { MutableInteractionSource() }, indication = null) {
+                                keeping = false
                                 state.change(state.look.withRecipe(r.look))
                                 state.commit()
-                            }.padding(vertical = 10.dp),
-                        ) {
-                            Txt(r.name, Type.body)
-                            Txt(recipeLine(r.look), Type.edgeSmall)
-                        }
-                        IconButton(Glyph.Trash, "删除配方 ${r.name}", { scope.launch { recipes.remove(r.id) } }, tint = Ink.Dim)
+                                overlays?.toast("已套用配方", r.name)
+                            }
+                            .padding(vertical = 10.dp),
+                    ) {
+                        Txt(r.name, Type.body, color = Ink.GlassText)
+                        Txt(recipeLine(r.look), Type.numSmall, color = Ink.GlassDim)
                     }
+                    IconButton(Glyph.Trash, "删除配方 ${r.name}", { scope.launch { recipes.remove(r.id) } }, tint = Ink.GlassDim)
                 }
             }
         }
     }
 }
-
-private const val SCAN = "@scan"
 
 /** A recipe in one line of edge lettering: its film, and what else it carries. */
 internal fun recipeLine(look: Look): String = listOfNotNull(
@@ -393,58 +435,94 @@ internal fun recipeLine(look: Look): String = listOfNotNull(
     "日期".takeIf { look.date.on },
 ).joinToString("  ·  ")
 
-private val BENCH_HEIGHT = 128.dp
-
-private class Picker(val label: String, val value: String, val changed: Boolean = false, val content: @Composable () -> Unit)
-
+/** The grip at the top of the tray: folds it away to leave more of the photograph, and brings it back. */
 @Composable
-private fun StageTabs(current: Stage, onPick: (Stage) -> Unit) {
-    Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Stage.entries.forEachIndexed { i, s ->
-            if (i > 0) Txt("›", Type.label, Modifier.padding(horizontal = 2.dp), color = Ink.Faint)
-            Box(Modifier.pressable { onPick(s) }.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                Txt(s.title, Type.heading, color = if (s == current) Ink.Amber else Ink.Dim)
+private fun Grab(collapsed: Boolean, onClick: () -> Unit) {
+    val line = Ink.Line2
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(20.dp)
+            .clickable(remember { MutableInteractionSource() }, indication = null, onClick = onClick)
+            .semantics { contentDescription = if (collapsed) "展开面板" else "收起面板" }
+            .drawBehind {
+                val w = 38.dp.toPx()
+                drawRoundRect(line, Offset(center.x - w / 2, center.y - 2.dp.toPx()), Size(w, 4.dp.toPx()), androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()))
+            },
+    )
+}
+
+/** Under the photograph: the photographs on the bench (the one being worked on is lit), a way to add one, and what this one is. */
+@Composable
+private fun Foot(state: DarkroomState, frame: Frame, frames: List<Frame>, onFrame: (Long) -> Unit, onImport: () -> Unit, modifier: Modifier = Modifier) {
+    val accent = Ink.Accent
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        LazyRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            items(frames, key = { it.id }) { f ->
+                val on = f.id == frame.id
+                Box(
+                    Modifier
+                        .padding(vertical = 5.dp)
+                        .size(42.dp)
+                        .graphicsLayer { alpha = if (on) 1f else .5f }
+                        .drawBehind { if (on) drawRect(accent, Offset(0f, size.height + 3.dp.toPx()), Size(size.width, 2.dp.toPx())) }
+                        .clickable(remember { MutableInteractionSource() }, indication = null) { if (!on) onFrame(f.id) }
+                        .semantics { contentDescription = f.name },
+                ) {
+                    FileImage(f.thumb, Modifier.fillMaxSize())
+                }
+            }
+            item(key = "add") {
+                Box(
+                    Modifier.size(42.dp).clip(CircleShape).border(1.dp, Ink.Line2, CircleShape)
+                        .clickable(remember { MutableInteractionSource() }, indication = null, onClick = onImport)
+                        .semantics { contentDescription = "再导入" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Glyph.Plus, tint = Ink.Dim, size = 18.dp)
+                }
+            }
+        }
+        Column(Modifier.width(132.dp), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Txt(when {
+                state.comparing -> "原图"
+                state.adjustmentsOnly -> "原图调节"
+                else -> shortName(FilmEngine.catalog.film(state.look.film)?.name ?: state.look.film)
+            }, Type.film)
+            Txt(if (state.adjustmentsOnly) frame.name else "${Format.of(state.look.format).label} · ${frame.name}", Type.numMicro, align = androidx.compose.ui.text.style.TextAlign.End)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Lamp(if (state.proofing) LampState.On else LampState.Off)
+                Txt(when {
+                    state.proofing -> if (state.adjustmentsOnly) "正在更新调节" else "正在出样张"
+                    state.proof != null -> if (state.adjustmentsOnly) "未应用胶片模拟" else "样张 · 细节以成片为准"
+                    else -> "正在读取原图"
+                }, Type.micro.copy(lineHeight = 14.sp), color = Ink.Faint)
             }
         }
     }
 }
 
 /**
- * The controls of a stage: a row of chips (pickers first, then one chip per
- * ruler) and, under it, either the strip of a picker or the ruler of the
- * selected chip. [at] counts rulers from 0; picker i is -(i + 1). [first] is
- * where a stage with nothing chosen yet opens.
+ * The photograph, small and out of focus, under the tray. It stays below the
+ * frame: the surround of the photograph itself is left neutral.
  */
 @Composable
-private fun ControlBench(state: DarkroomState, controls: List<Control>, at: Int, onAt: (Int) -> Unit, pickers: List<Picker>, first: Int = -1) {
-    val wanted = if (at < -pickers.size || at > controls.lastIndex) first else at
-    val index = wanted.coerceIn(-pickers.size, controls.lastIndex).let { if (it >= 0 && controls.isEmpty()) -1 else it }
-    Column(Modifier.fillMaxWidth().height(BENCH_HEIGHT)) {
-        LazyRow(Modifier.fillMaxWidth().height(60.dp), contentPadding = PaddingValues(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            items(pickers.size, key = { "picker-$it" }) { i ->
-                val picker = pickers[i]
-                ParamChip(picker.label, picker.value, changed = picker.changed, selected = index == -(i + 1), onClick = { onAt(-(i + 1)) })
-            }
-            items(controls.size, key = { controls[it].id }) { i ->
-                val c = controls[i]
-                val v = c.get(state.look)
-                ParamChip(c.label, c.format(v), changed = v != c.default, selected = i == index, onClick = { onAt(i) })
-            }
+private fun Ambient(proof: ImageBitmap?, modifier: Modifier, sideways: Boolean) {
+    val small = remember(proof) { proof?.let { ambientOf(it.asAndroidBitmap(), 24) } }
+    val light = Ink.light
+    val richer = remember { ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(1.5f) }) }
+    val shape = modifier
+        .graphicsLayer {
+            compositingStrategy = CompositingStrategy.Offscreen
+            alpha = if (light) .5f else .62f
         }
-        Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-            if (index < 0) {
-                pickers[-index - 1].content()
-            } else {
-                val c = controls[index]
-                Ruler(
-                    name = c.label,
-                    value = c.get(state.look),
-                    min = c.min, max = c.max, step = c.step, major = c.major, default = c.default,
-                    label = c.format,
-                    onChange = { state.change(c.set(state.look, it)) },
-                    onSettled = state::commit,
-                )
-            }
+        .drawWithContent {
+            drawContent()
+            drawRect(
+                if (sideways) Brush.horizontalGradient(0f to Color.Transparent, .46f to Color.Black)
+                else Brush.verticalGradient(0f to Color.Transparent, .46f to Color.Black),
+                blendMode = BlendMode.DstIn,
+            )
         }
-    }
+    if (small != null) Image(small, null, shape, contentScale = ContentScale.Crop, alignment = Alignment.BottomCenter, colorFilter = richer, filterQuality = FilterQuality.High)
 }

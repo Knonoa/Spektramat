@@ -1,7 +1,7 @@
 package com.spektra.latent.ui
 
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.Canvas
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,10 +9,10 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,242 +26,224 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
+import androidx.compose.ui.unit.sp
 
 /**
  * A press that the finger can feel without a ripple: the thing sinks a little
- * and dims while held.
+ * while held ([sink] is how small it gets) and springs back.
  */
-fun Modifier.pressable(enabled: Boolean = true, role: Role? = Role.Button, onClick: () -> Unit): Modifier = composed {
+fun Modifier.pressable(enabled: Boolean = true, role: Role? = Role.Button, sink: Float = .965f, onClick: () -> Unit): Modifier = composed {
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
-    val k by animateFloatAsState(if (pressed && enabled) 1f else 0f, label = "press")
+    val k by animateFloatAsState(if (pressed && enabled) 1f else 0f, tween(if (pressed) 90 else 350, easing = Motion.Ease), label = "press")
     this
         .graphicsLayer {
-            val s = 1f - 0.04f * k
+            val s = 1f - (1f - sink) * k
             scaleX = s
             scaleY = s
-            alpha = (if (enabled) 1f else 0.35f) - 0.25f * k
+            alpha = if (enabled) 1f else .38f
         }
         .clickable(interactionSource = source, indication = null, enabled = enabled, role = role, onClick = onClick)
 }
 
-/** The app's one button shape. Filled amber is the screen's main action; there is at most one. */
+enum class BtnKind {
+    /** The screen's one main action: amber. */
+    Key,
+    /** A recessed button on glass or on a card. */
+    Glass,
+    /** An outline only. */
+    Line,
+    /** Something that cannot be taken back. */
+    Danger,
+}
+
+enum class BtnSize(val height: Dp, val pad: Dp, val font: Float) {
+    Regular(46.dp, 20.dp, 14f), Bar(40.dp, 17.dp, 13.5f), Small(36.dp, 14.dp, 13f)
+}
+
+private val keyGlow = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+private var keyGlowBlur = 0f
+
+/** The app's button: a capsule. */
 @Composable
-fun Pill(
+fun Btn(
     text: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    filled: Boolean = false,
+    kind: BtnKind = BtnKind.Glass,
+    size: BtnSize = BtnSize.Regular,
+    icon: Glyph? = null,
     enabled: Boolean = true,
-    danger: Boolean = false,
 ) {
     val shape = RoundedCornerShape(50)
-    val ink = if (danger) Ink.Red else Ink.Amber
-    Box(
-        modifier
-            .pressable(enabled, onClick = onClick)
+    val ink = when (kind) {
+        BtnKind.Key -> Ink.AmberInk
+        BtnKind.Danger -> Ink.Rec
+        else -> Ink.GlassText
+    }
+    val line2 = Ink.Line2
+    val well = Ink.Well
+    val hi = Ink.CardHi
+    val face = when (kind) {
+        BtnKind.Key -> Modifier
+            .drawBehind {
+                // 0 12px 26px -12px: the button's own light on what is under it. A button that cannot be pressed
+                // gives none: it is drawn faded, in a layer of its own size, which would cut the light off square.
+                val spread = 12.dp.toPx()
+                if (enabled && this.size.width > 2 * spread) drawIntoCanvas {
+                    val blur = (13.dp.toPx() - .5f) / .57735f
+                    if (blur != keyGlowBlur) {
+                        keyGlowBlur = blur
+                        keyGlow.maskFilter = android.graphics.BlurMaskFilter(blur, android.graphics.BlurMaskFilter.Blur.NORMAL)
+                    }
+                    keyGlow.color = Ink.Amber.copy(alpha = .62f).toArgb()
+                    val r = this.size.height / 2
+                    it.nativeCanvas.drawRoundRect(spread, spread + 12.dp.toPx(), this.size.width - spread, this.size.height + 2.dp.toPx(), r, r, keyGlow)
+                }
+            }
             .clip(shape)
-            .then(if (filled) Modifier.background(ink) else Modifier.border(1.dp, if (danger) Ink.Red else Ink.Line, shape))
-            .defaultMinSize(minWidth = 64.dp, minHeight = 36.dp)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        contentAlignment = Alignment.Center,
+            .background(Brush.verticalGradient(listOf(Ink.Amber2, Ink.Amber)))
+            .drawBehind {
+                val r = this.size.height / 2
+                drawRoundRect(
+                    Brush.verticalGradient(0f to Color.White.copy(alpha = .55f), .5f to Color.Transparent),
+                    Offset(.5.dp.toPx(), .5.dp.toPx()), Size(this.size.width - 1.dp.toPx(), this.size.height - 1.dp.toPx()),
+                    CornerRadius(r), style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx()),
+                )
+            }
+        BtnKind.Glass -> Modifier
+            .clip(shape).background(well).border(1.dp, line2, shape)
+            .drawBehind {
+                val r = this.size.height / 2
+                drawRoundRect(
+                    Brush.verticalGradient(0f to hi, .5f to Color.Transparent),
+                    Offset(1.5.dp.toPx(), 1.5.dp.toPx()), Size(this.size.width - 3.dp.toPx(), this.size.height - 3.dp.toPx()),
+                    CornerRadius(r), style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx()),
+                )
+            }
+        BtnKind.Line -> Modifier.clip(shape).border(1.dp, line2, shape)
+        BtnKind.Danger -> Modifier.clip(shape).border(1.dp, Ink.Rec.copy(alpha = .6f), shape)
+    }
+    Row(
+        modifier
+            .pressable(enabled, onClick = onClick)
+            .then(face)
+            .defaultMinSize(minHeight = size.height)
+            .height(size.height)
+            .padding(horizontal = size.pad),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
     ) {
-        Txt(text, Type.label, color = if (filled) Color.Black else if (danger) Ink.Red else Ink.Text)
+        if (icon != null) Icon(icon, tint = ink, size = 18.dp)
+        Txt(
+            text,
+            Type.body.copy(fontSize = size.font.sp, letterSpacing = .04.em, fontWeight = if (kind == BtnKind.Key) FontWeight.Medium else FontWeight.Normal),
+            color = ink,
+        )
     }
 }
 
-enum class Glyph {
-    Back, Undo, Redo, Plus, Check, Close, Share, Trash, Compare, Camera, Flip,
-    Recipe, Monitor, Table, Loupe, Lamp, Lock, Front, Magnet, Arrange, Fit, Grid, Flash, Turn, Film,
-}
-
-/** Line icons drawn in a 24-unit box; no icon font, no dependency. */
+/** A round touch target around an icon. [on]: the thing it switches is on. */
 @Composable
-fun Icon(glyph: Glyph, modifier: Modifier = Modifier, tint: Color = Ink.Text, size: Dp = 24.dp) {
-    Canvas(modifier.size(size)) {
-        val u = this.size.minDimension / 24f
-        val stroke = Stroke(width = 1.7f * u, cap = StrokeCap.Round, join = StrokeJoin.Round)
-        fun line(x0: Float, y0: Float, x1: Float, y1: Float) =
-            drawLine(tint, Offset(x0 * u, y0 * u), Offset(x1 * u, y1 * u), 1.7f * u, StrokeCap.Round)
-        fun path(build: Path.() -> Unit) = drawPath(Path().apply(build), tint, style = stroke)
-        when (glyph) {
-            Glyph.Back -> path { moveTo(14.5f * u, 5f * u); lineTo(7.5f * u, 12f * u); lineTo(14.5f * u, 19f * u) }
-            Glyph.Undo, Glyph.Redo -> {
-                val flip = glyph == Glyph.Redo
-                fun x(v: Float) = (if (flip) 24f - v else v) * u
-                path {
-                    moveTo(x(9f), 6f * u); lineTo(x(5f), 10f * u); lineTo(x(9f), 14f * u)
-                }
-                path {
-                    moveTo(x(5f), 10f * u); lineTo(x(13.5f), 10f * u)
-                    cubicTo(x(17.6f), 10f * u, x(19.5f), 12.2f * u, x(19.5f), 14.5f * u)
-                    cubicTo(x(19.5f), 16.8f * u, x(17.6f), 19f * u, x(13.5f), 19f * u)
-                    lineTo(x(11f), 19f * u)
-                }
-            }
-            Glyph.Plus -> { line(12f, 5f, 12f, 19f); line(5f, 12f, 19f, 12f) }
-            Glyph.Check -> path { moveTo(5f * u, 12.5f * u); lineTo(10f * u, 17.5f * u); lineTo(19f * u, 7f * u) }
-            Glyph.Close -> { line(6f, 6f, 18f, 18f); line(18f, 6f, 6f, 18f) }
-            Glyph.Share -> {
-                line(12f, 4f, 12f, 15f)
-                path { moveTo(7.5f * u, 8.5f * u); lineTo(12f * u, 4f * u); lineTo(16.5f * u, 8.5f * u) }
-                path { moveTo(5f * u, 13f * u); lineTo(5f * u, 20f * u); lineTo(19f * u, 20f * u); lineTo(19f * u, 13f * u) }
-            }
-            Glyph.Trash -> {
-                line(5f, 7f, 19f, 7f)
-                path { moveTo(9f * u, 7f * u); lineTo(9.6f * u, 4.5f * u); lineTo(14.4f * u, 4.5f * u); lineTo(15f * u, 7f * u) }
-                path { moveTo(7f * u, 7f * u); lineTo(8f * u, 20f * u); lineTo(16f * u, 20f * u); lineTo(17f * u, 7f * u) }
-            }
-            Glyph.Camera -> {
-                path {
-                    moveTo(3.5f * u, 8f * u); lineTo(7.5f * u, 8f * u); lineTo(9f * u, 5.5f * u); lineTo(15f * u, 5.5f * u)
-                    lineTo(16.5f * u, 8f * u); lineTo(20.5f * u, 8f * u); lineTo(20.5f * u, 18.5f * u); lineTo(3.5f * u, 18.5f * u); close()
-                }
-                drawCircle(tint, 3.4f * u, Offset(12f * u, 13f * u), style = stroke)
-            }
-            Glyph.Flip -> {
-                // two arrows chasing each other round: the other side of the phone
-                drawArc(tint, 200f, 140f, false, Offset(4.5f * u, 4.5f * u), Size(15f * u, 15f * u), style = stroke)
-                drawArc(tint, 20f, 140f, false, Offset(4.5f * u, 4.5f * u), Size(15f * u, 15f * u), style = stroke)
-                path { moveTo(19.6f * u, 5.2f * u); lineTo(19.2f * u, 9.6f * u); lineTo(15f * u, 8.6f * u) }
-                path { moveTo(4.4f * u, 18.8f * u); lineTo(4.8f * u, 14.4f * u); lineTo(9f * u, 15.4f * u) }
-            }
-            Glyph.Compare -> {
-                path { moveTo(4f * u, 5f * u); lineTo(20f * u, 5f * u); lineTo(20f * u, 19f * u); lineTo(4f * u, 19f * u); close() }
-                line(12f, 3f, 12f, 21f)
-            }
-            Glyph.Recipe -> path {
-                // a bookmark: a look kept for later
-                moveTo(7f * u, 4f * u); lineTo(17f * u, 4f * u); lineTo(17f * u, 20f * u); lineTo(12f * u, 16f * u); lineTo(7f * u, 20f * u); close()
-            }
-            Glyph.Monitor -> {
-                path { moveTo(3.5f * u, 5f * u); lineTo(20.5f * u, 5f * u); lineTo(20.5f * u, 16f * u); lineTo(3.5f * u, 16f * u); close() }
-                line(9f, 20f, 15f, 20f)
-                line(12f, 16f, 12f, 20f)
-            }
-            Glyph.Table -> {
-                // two sheets lying on a table, one turned
-                path { moveTo(4f * u, 7f * u); lineTo(13f * u, 5f * u); lineTo(15f * u, 13f * u); lineTo(6f * u, 15f * u); close() }
-                path { moveTo(11f * u, 11f * u); lineTo(20f * u, 11f * u); lineTo(20f * u, 19f * u); lineTo(11f * u, 19f * u); close() }
-            }
-            Glyph.Loupe -> {
-                drawCircle(tint, 5.6f * u, Offset(10.5f * u, 10.5f * u), style = stroke)
-                line(14.8f, 14.8f, 20f, 20f)
-            }
-            Glyph.Lamp -> {
-                drawArc(tint, 150f, 240f, false, Offset(6.5f * u, 3.5f * u), Size(11f * u, 11f * u), style = stroke)
-                path { moveTo(9.3f * u, 13.6f * u); lineTo(9.8f * u, 17f * u); lineTo(14.2f * u, 17f * u); lineTo(14.7f * u, 13.6f * u) }
-                line(10.3f, 20f, 13.7f, 20f)
-            }
-            Glyph.Lock -> {
-                path { moveTo(6f * u, 11f * u); lineTo(18f * u, 11f * u); lineTo(18f * u, 20f * u); lineTo(6f * u, 20f * u); close() }
-                drawArc(tint, 180f, 180f, false, Offset(8.5f * u, 4.5f * u), Size(7f * u, 9f * u), style = stroke)
-            }
-            Glyph.Front -> {
-                path { moveTo(4f * u, 4f * u); lineTo(14f * u, 4f * u); lineTo(14f * u, 14f * u); lineTo(4f * u, 14f * u); close() }
-                path { moveTo(17f * u, 10f * u); lineTo(20f * u, 10f * u); lineTo(20f * u, 20f * u); lineTo(10f * u, 20f * u); lineTo(10f * u, 17f * u) }
-            }
-            Glyph.Magnet -> {
-                path {
-                    moveTo(6f * u, 4f * u); lineTo(6f * u, 13f * u)
-                    cubicTo(6f * u, 21.5f * u, 18f * u, 21.5f * u, 18f * u, 13f * u)
-                    lineTo(18f * u, 4f * u); lineTo(14f * u, 4f * u); lineTo(14f * u, 13f * u)
-                    cubicTo(14f * u, 16f * u, 10f * u, 16f * u, 10f * u, 13f * u)
-                    lineTo(10f * u, 4f * u); close()
-                }
-                line(6f, 8f, 10f, 8f)
-                line(14f, 8f, 18f, 8f)
-            }
-            Glyph.Arrange -> {
-                for (cx in listOf(4.5f, 13.5f)) for (cy in listOf(4.5f, 13.5f)) {
-                    path { moveTo(cx * u, cy * u); lineTo((cx + 6f) * u, cy * u); lineTo((cx + 6f) * u, (cy + 6f) * u); lineTo(cx * u, (cy + 6f) * u); close() }
-                }
-            }
-            Glyph.Fit -> {
-                path { moveTo(4f * u, 9f * u); lineTo(4f * u, 4f * u); lineTo(9f * u, 4f * u) }
-                path { moveTo(15f * u, 4f * u); lineTo(20f * u, 4f * u); lineTo(20f * u, 9f * u) }
-                path { moveTo(20f * u, 15f * u); lineTo(20f * u, 20f * u); lineTo(15f * u, 20f * u) }
-                path { moveTo(9f * u, 20f * u); lineTo(4f * u, 20f * u); lineTo(4f * u, 15f * u) }
-            }
-            Glyph.Grid -> {
-                path { moveTo(4f * u, 4f * u); lineTo(20f * u, 4f * u); lineTo(20f * u, 20f * u); lineTo(4f * u, 20f * u); close() }
-                line(9.3f, 4f, 9.3f, 20f); line(14.7f, 4f, 14.7f, 20f)
-                line(4f, 9.3f, 20f, 9.3f); line(4f, 14.7f, 20f, 14.7f)
-            }
-            Glyph.Flash -> path {
-                moveTo(13.5f * u, 3f * u); lineTo(6.5f * u, 13f * u); lineTo(11.5f * u, 13f * u)
-                lineTo(10.5f * u, 21f * u); lineTo(17.5f * u, 11f * u); lineTo(12.5f * u, 11f * u); close()
-            }
-            Glyph.Turn -> {
-                drawArc(tint, -60f, 300f, false, Offset(5f * u, 5f * u), Size(14f * u, 14f * u), style = stroke)
-                path { moveTo(15.2f * u, 2.6f * u); lineTo(15.6f * u, 6.4f * u); lineTo(11.8f * u, 6.9f * u) }
-            }
-            Glyph.Film -> {
-                path { moveTo(3.5f * u, 6f * u); lineTo(20.5f * u, 6f * u); lineTo(20.5f * u, 18f * u); lineTo(3.5f * u, 18f * u); close() }
-                for (x in listOf(6.5f, 10.2f, 13.8f, 17.5f)) { line(x, 8.3f, x, 8.9f); line(x, 15.1f, x, 15.7f) }
-            }
-        }
-    }
-}
-
-/** A round touch target around an icon. */
-@Composable
-fun IconButton(glyph: Glyph, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true, tint: Color = Ink.Text) {
+fun IconButton(
+    glyph: Glyph,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    tint: Color = Color.Unspecified,
+    on: Boolean = false,
+    size: Dp = 44.dp,
+) {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val k by animateFloatAsState(if (pressed && enabled) 1f else 0f, tween(if (pressed) 80 else 300, easing = Motion.Ease), label = "icon")
+    val well = Ink.Well
     Box(
         modifier
-            .size(44.dp)
+            .size(size)
+            .graphicsLayer {
+                val s = 1f - .1f * k
+                scaleX = s
+                scaleY = s
+                alpha = if (enabled) 1f else .32f
+            }
             .clip(CircleShape)
-            .pressable(enabled, onClick = onClick)
+            .drawBehind { if (k > 0f) drawCircle(well.copy(alpha = well.alpha * k)) }
+            .clickable(interactionSource = source, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
             .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(glyph, tint = tint)
+        Icon(glyph, tint = if (tint != Color.Unspecified) tint else if (on) Ink.Accent else Ink.GlassText)
     }
 }
 
-/**
- * One control in the row above the ruler: its value on top in edge lettering
- * (amber once it has been moved), its name below. The selected one carries a
- * small amber mark.
- */
+/** A free-standing round glass button: flip the camera, record. */
 @Composable
-fun ParamChip(label: String, value: String, changed: Boolean, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Column(
+fun Orb(label: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true, content: @Composable () -> Unit) {
+    Box(
         modifier
-            .pressable(onClick = onClick)
-            .defaultMinSize(minWidth = 60.dp)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(3.dp),
-    ) {
-        Txt(value, Type.edge, color = if (changed) Ink.Amber else if (selected) Ink.Text else Ink.Dim)
-        Txt(label, Type.caption, color = if (selected) Ink.Text else Ink.Dim)
-        Box(
-            Modifier
-                .size(width = 14.dp, height = 2.dp)
-                .background(if (selected) Ink.Amber else Color.Transparent, RoundedCornerShape(1.dp)),
-        )
+            .size(48.dp)
+            .pressable(enabled, sink = .92f, onClick = onClick)
+            .glass(24.dp, GlassTone.Thin, shadow = false)
+            .semantics { contentDescription = label },
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+enum class LampState { On, Off, Rec }
+
+private val lampGlow = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+
+/** A small pilot light: something is going on. */
+@Composable
+fun Lamp(state: LampState = LampState.On, modifier: Modifier = Modifier) {
+    val colour = when (state) {
+        LampState.On -> Ink.Amber
+        LampState.Off -> Ink.Faint
+        LampState.Rec -> Ink.Rec
     }
+    Box(
+        modifier.size(6.dp).drawBehind {
+            if (state != LampState.Off) drawIntoCanvas {
+                lampGlow.color = colour.copy(alpha = .8f).toArgb()
+                lampGlow.maskFilter = android.graphics.BlurMaskFilter(4.dp.toPx(), android.graphics.BlurMaskFilter.Blur.NORMAL)
+                it.nativeCanvas.drawCircle(center.x, center.y, 4.dp.toPx(), lampGlow)
+            }
+            drawCircle(colour)
+        },
+    )
 }
 
 /** A hairline. */
 @Composable
 fun Hairline(modifier: Modifier = Modifier) {
-    Box(modifier.height(1.dp).background(Ink.Line))
+    Box(modifier.fillMaxWidth().height(1.dp).background(Ink.Line))
+}
+
+/** A short upright line between two groups of buttons in a capsule. */
+@Composable
+fun BarSep() {
+    Box(Modifier.padding(horizontal = 3.dp).size(1.dp, 20.dp).background(Ink.Line2))
 }
 
 @Composable

@@ -15,6 +15,7 @@ import com.spektra.latent.model.Shooting
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -66,8 +67,24 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
     /** Every order that has not been dismissed, oldest first. Read and changed on the main thread. */
     val jobs = mutableStateListOf<PrintJob>()
 
+    init {
+        scope.launch {
+            library.rolls.collect { rolls ->
+                val alive = rolls.flatMap { it.frames }.mapTo(HashSet()) { it.id }
+                for (job in jobs.toList()) {
+                    if (job.frame.id !in alive && (job.state is PrintJob.State.Waiting || job.state is PrintJob.State.Working)) stop(job)
+                }
+            }
+        }
+    }
+
     fun order(frame: Frame, look: Look, longEdge: Int, format: PrintFormat = PrintFormat.AUTO): PrintJob {
         val job = PrintJob(nextId++, frame, look, longEdge, format)
+        if (library.frame(frame.id) == null) {
+            job.stopped = true
+            job.state = PrintJob.State.Failed("这张照片已从片库移除")
+            return job
+        }
         jobs += job
         scope.launch { run(job) }
         return job
@@ -88,20 +105,29 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
 
     private suspend fun run(job: PrintJob) = gate.withLock {
         if (job.stopped) return@withLock
+        if (library.frame(job.frame.id) == null) {
+            stop(job)
+            return@withLock
+        }
         job.state = PrintJob.State.Working
         // the big pixels for the indicator: cheap, and independent of the print itself
         scope.launch(Dispatchers.IO) {
             try {
                 val (before, after) = bigPixels(job.frame, job.look)
-                job.before = before
-                job.after = after
+                if (!job.stopped) {
+                    job.before = before
+                    job.after = after
+                }
             } catch (e: Exception) {
                 Journal.w(TAG, "no big pixels for ${job.frame.name}", e)
             }
         }
         try {
-            val printed = Printer.print(app, library, job.frame, job.look, job.longEdge, job.format) { job.stage = it }
-            if (job.stopped) printed.shown.recycle() else job.state = PrintJob.State.Done(printed)
+            val printed = Printer.print(
+                app, library, job.frame, job.look, job.longEdge, job.format,
+                shouldStop = { job.stopped || library.frame(job.frame.id) == null },
+            ) { job.stage = it }
+            if (job.stopped || library.frame(job.frame.id) == null) printed.shown.recycle() else job.state = PrintJob.State.Done(printed)
         } catch (e: DevelopCancelled) {
             // stopped by the person: already off the desk
         } catch (e: CancellationException) {

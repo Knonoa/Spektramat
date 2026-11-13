@@ -143,6 +143,27 @@ fun bounds(doc: TableDoc, shape: Shapes): Rect? {
     return if (x0 == Float.POSITIVE_INFINITY) null else Rect(x0, y0, x1, y1)
 }
 
+/** The exact rotated photo bounds, grown outwards to an export aspect without cropping. */
+internal fun exportBounds(doc:TableDoc,shape:Shapes,ratio:Float?=null):Rect? {
+    if(doc.placements.isEmpty())return null
+    var left=Float.POSITIVE_INFINITY;var top=Float.POSITIVE_INFINITY
+    var right=Float.NEGATIVE_INFINITY;var bottom=Float.NEGATIVE_INFINITY
+    for(p in doc.placements) {
+        val a=p.rot*Math.PI.toFloat()/180f
+        val hw=(abs(cos(a))*p.w+abs(sin(a))*p.w*shape(p.frameId))/2
+        val hh=(abs(sin(a))*p.w+abs(cos(a))*p.w*shape(p.frameId))/2
+        left=min(left,p.cx-hw);right=max(right,p.cx+hw)
+        top=min(top,p.cy-hh);bottom=max(bottom,p.cy+hh)
+    }
+    val margin=28f
+    var w=right-left+2*margin;var h=bottom-top+2*margin
+    if(ratio!=null && ratio.isFinite() && ratio>0f) {
+        if(w/h<ratio)w=h*ratio else h=w/ratio
+    }
+    val cx=(left+right)/2;val cy=(top+bottom)/2
+    return Rect(cx-w/2,cy-h/2,cx+w/2,cy+h/2)
+}
+
 /** A point of a photograph, given from its centre along its own axes, as a point of the table. */
 fun local(p: Placement, lx: Float, ly: Float): Offset {
     val r = p.rot * Math.PI.toFloat() / 180f
@@ -347,7 +368,7 @@ fun DrawScope.drawTable(scene: Scene) {
             if (scene.marks) {
                 for (g in scene.guides) {
                     val effect = PathEffect.dashPathEffect(floatArrayOf(6f * k * density, 4f * k * density))
-                    val colour = if (lamp.on) Color(0xFF121316).copy(alpha = 0.55f) else Color.White.copy(alpha = 0.6f)
+                    val colour = MARK
                     if (g.vertical) drawLine(colour, Offset(g.at, g.from - 40 * k), Offset(g.at, g.to + 40 * k), k * density, pathEffect = effect)
                     else drawLine(colour, Offset(g.from - 40 * k, g.at), Offset(g.to + 40 * k, g.at), k * density, pathEffect = effect)
                 }
@@ -355,19 +376,19 @@ fun DrawScope.drawTable(scene: Scene) {
                     val h = p.w * scene.shape(p.frameId)
                     val off = 7f * k * density
                     rotate(p.rot, Offset(p.cx, p.cy)) {
-                        val frame = Stroke(2f * k * density, pathEffect = if (p.locked) PathEffect.dashPathEffect(floatArrayOf(8f * k * density, 6f * k * density)) else null)
-                        drawRect(ink, Offset(p.cx - p.w / 2 - off, p.cy - h / 2 - off), Size(p.w + off * 2, h + off * 2), style = frame)
+                        val frame = Stroke(1.5f * k * density, pathEffect = if (p.locked) PathEffect.dashPathEffect(floatArrayOf(8f * k * density, 6f * k * density)) else null)
+                        drawRect(MARK, Offset(p.cx - p.w / 2 - off, p.cy - h / 2 - off), Size(p.w + off * 2, h + off * 2), style = frame)
                         if (!p.locked) {
                             val top = p.cy - h / 2 - off
                             val handleY = top - HANDLE_STEM * k * density
-                            drawLine(ink, Offset(p.cx, top), Offset(p.cx, handleY + 11f * k * density), 2f * k * density)
+                            drawLine(MARK, Offset(p.cx, top), Offset(p.cx, handleY + 11f * k * density), 1.5f * k * density)
                             fun knob(c: Offset, r: Float) {
-                                drawCircle(if (lamp.on) Color.White else Color(0xFF121316), r, c)
-                                drawCircle(ink, r, c, style = Stroke(2f * k * density))
+                                drawCircle(PAPER, r, c)
+                                drawCircle(MARK, r, c, style = Stroke(1.5f * k * density))
                             }
                             knob(Offset(p.cx, handleY), 11f * k * density)
                             drawArc(
-                                ink, -162f, 243f, false,
+                                MARK, -162f, 243f, false,
                                 Offset(p.cx - 5f * k * density, handleY - 5f * k * density), Size(10f * k * density, 10f * k * density),
                                 style = Stroke(1.6f * k * density),
                             )
@@ -376,12 +397,16 @@ fun DrawScope.drawTable(scene: Scene) {
                     }
                 }
                 scene.doc.loupes.firstOrNull { it.id == scene.selectedLoupe }?.let { l ->
-                    drawCircle(ink, l.size / 2 + 4f * k * density, Offset(l.cx, l.cy), style = Stroke(2f * k * density))
+                    drawCircle(MARK, l.size / 2 + 4f * k * density, Offset(l.cx, l.cy), style = Stroke(1.5f * k * density))
                 }
             }
         }
     }
 }
+
+/** What is chosen is outlined in the app's one light; its handles are paper. */
+private val MARK = Color(0xFFFFA51F)
+private val PAPER = Color(0xFFF4F1E8)
 
 /** How far above a selected photograph its turning handle stands, in dp at any zoom. */
 const val HANDLE_STEM = 34f

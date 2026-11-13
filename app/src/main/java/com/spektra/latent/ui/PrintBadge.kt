@@ -24,9 +24,9 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -43,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -92,7 +93,7 @@ import kotlin.math.sin
  * away by itself.
  */
 @Composable
-fun PrintOverlay(desk: PrintDesk) {
+fun PrintOverlay(desk: PrintDesk, activeFrame:Long?=null) {
     val jobs = desk.jobs
     val job = jobs.firstOrNull { it.state is PrintJob.State.Working }
         ?: jobs.firstOrNull { it.state is PrintJob.State.Waiting }
@@ -116,8 +117,8 @@ fun PrintOverlay(desk: PrintDesk) {
 
     Box(Modifier.fillMaxSize()) {
         AnimatedVisibility(
-            visible = job != null,
-            modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 62.dp, end = 6.dp),
+            visible = job != null && (activeFrame != job.frame.id || job.state is PrintJob.State.Failed || job.state is PrintJob.State.Done),
+            modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 70.dp, end = 4.dp),
             enter = fadeIn(tween(120)) + scaleIn(spring(0.6f, 520f), initialScale = 0.4f, transformOrigin = TransformOrigin(1f, 0f)),
             exit = fadeOut(tween(200)) + scaleOut(tween(200), targetScale = 0.6f, transformOrigin = TransformOrigin(1f, 0f)),
         ) {
@@ -127,7 +128,16 @@ fun PrintOverlay(desk: PrintDesk) {
             shown.value?.let { Tile(it, waiting = jobs.count { j -> j !== it && j.state is PrintJob.State.Waiting }) { opened = it.id } }
         }
         if (job != null) {
-            Sheet(open, { opened = null }) { Details(job, desk) { opened = null } }
+            val close = { opened = null }
+            Sheet(
+                open, close,
+                title = when (state) {
+                    is PrintJob.State.Done -> "成片"
+                    is PrintJob.State.Failed -> "没有冲印出来"
+                    else -> "正在冲印"
+                },
+                foot = { DetailsFoot(job, desk, close) },
+            ) { Details(job) }
         }
     }
 }
@@ -150,7 +160,8 @@ private fun Tile(job: PrintJob, waiting: Int, onTap: () -> Unit) {
     val haptic = LocalHapticFeedback.current
     LaunchedEffect(done) { if (done) haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
 
-    val line = if (state is PrintJob.State.Failed) Ink.Red else Ink.Amber
+    val line = if (state is PrintJob.State.Failed) Ink.Rec else Ink.Amber
+    val shade = Ink.PhotoShadow
     val description = when (state) {
         is PrintJob.State.Done -> "成片已保存，点开查看"
         is PrintJob.State.Failed -> "没有冲印出来，点开看原因"
@@ -163,9 +174,10 @@ private fun Tile(job: PrintJob, waiting: Int, onTap: () -> Unit) {
                 val corner = size.width * 0.25f
                 val stroke = 2.dp.toPx()
                 val inset = 2.dp.toPx()
-                drawRoundRect(Ink.Body, cornerRadius = CornerRadius(corner))
+                softShadow(Rect(Offset.Zero, size), corner, shade.copy(alpha = shade.alpha * .5f), 8.dp.toPx(), 18.dp.toPx(), -6.dp.toPx())
+                drawRoundRect(MOUNT, cornerRadius = CornerRadius(corner))
                 val around = ringPath(size, inset, corner - inset)
-                drawPath(around, Ink.Line, style = Stroke(stroke))
+                drawPath(around, Color.White.copy(alpha = .16f), style = Stroke(stroke))
                 val shownProgress = if (state is PrintJob.State.Failed) 1f else progress
                 if (shownProgress > 0f) {
                     val measure = PathMeasure().apply { setPath(around, false) }
@@ -181,21 +193,24 @@ private fun Tile(job: PrintJob, waiting: Int, onTap: () -> Unit) {
             ) {
                 when (state) {
                     is PrintJob.State.Done -> Resolved(state.printed, Modifier.fillMaxSize())
-                    is PrintJob.State.Failed -> Txt("!", Type.title, color = Ink.Red)
+                    is PrintJob.State.Failed -> Txt("!", Type.title, color = Ink.Rec)
                     else -> Loader(job.before, job.after, Modifier.fillMaxSize())
                 }
             }
         }
         if (waiting > 0 && !done) {
             Box(
-                Modifier.align(Alignment.BottomStart).size(22.dp).background(Ink.Raised, RoundedCornerShape(50)),
+                Modifier.align(Alignment.BottomStart).size(22.dp).background(Ink.Amber, RoundedCornerShape(50)),
                 contentAlignment = Alignment.Center,
             ) {
-                Txt("+$waiting", Type.edgeSmall, color = Ink.Text)
+                Txt("+$waiting", Type.numMicro, color = Ink.AmberInk)
             }
         }
     }
 }
+
+/** What the tile is mounted on. */
+private val MOUNT = Color(0xFF101012)
 
 /** A rounded square drawn clockwise from the middle of its top edge, so that progress starts at twelve o'clock. */
 private fun ringPath(size: Size, inset: Float, radius: Float): Path = Path().apply {
@@ -306,42 +321,32 @@ private fun Resolved(printed: Printed, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun Details(job: PrintJob, desk: PrintDesk, close: () -> Unit) {
-    val context = LocalContext.current
+private fun Details(job: PrintJob) {
     val film = FilmEngine.catalog.film(job.look.film)?.name ?: job.look.film
     when (val state = job.state) {
         is PrintJob.State.Done -> {
-            Box(Modifier.fillMaxWidth().heightIn(max = 380.dp), contentAlignment = Alignment.Center) {
+            // the print lying on the sheet, on its paper
+            val shade = Ink.PhotoShadow
+            Box(Modifier.fillMaxWidth().heightIn(max = 340.dp).padding(top = 4.dp, bottom = 22.dp), contentAlignment = Alignment.Center) {
                 Image(
                     bitmap = state.printed.shown.asImageBitmap(), contentDescription = "成片",
-                    modifier = Modifier.background(Ink.Paper).padding(8.dp), contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .drawBehind { softShadow(Rect(Offset.Zero, size), 0f, shade.copy(alpha = shade.alpha * .7f), 14.dp.toPx(), 30.dp.toPx(), -10.dp.toPx()) }
+                        .background(Ink.Paper).padding(7.dp),
+                    contentScale = ContentScale.Fit,
                 )
             }
-            Gap(height = 14.dp)
-            Txt("$film  ${state.printed.width} × ${state.printed.height}", Type.edge)
-            Gap(height = 2.dp)
-            Txt("已保存到相册的 ${APP_NAME} 相簿", Type.label, color = Ink.Dim)
-            Gap(height = 16.dp)
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Pill("分享", {
-                    context.startActivity(
-                        Intent.createChooser(
-                            Intent(Intent.ACTION_SEND).setType(context.contentResolver.getType(state.printed.uri) ?: "image/*")
-                                .putExtra(Intent.EXTRA_STREAM, state.printed.uri)
-                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                            null,
-                        ),
-                    )
-                }, Modifier.weight(1f))
-                Pill("好", { close(); desk.dismiss(job) }, Modifier.weight(1f), filled = true)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Txt(film.uppercase(), Type.film, Modifier.weight(1f), color = Ink.GlassText, maxLines = 1)
+                Txt("${state.printed.width} × ${state.printed.height}", Type.numSmall, color = Ink.GlassDim)
             }
+            Gap(height = 6.dp)
+            Txt("已经存进相册的 ${APP_NAME} 相簿。", Type.label, color = Ink.GlassDim)
         }
         is PrintJob.State.Failed -> {
-            Txt("没有冲印出来", Type.heading)
+            Txt(state.reason, Type.body, color = Ink.GlassDim, maxLines = 6)
             Gap(height = 6.dp)
-            Txt(state.reason, Type.body, color = Ink.Dim, maxLines = 5)
-            Gap(height = 16.dp)
-            Pill("知道了", { close(); desk.dismiss(job) }, Modifier.fillMaxWidth())
+            Txt("${job.frame.name} · $film", Type.numSmall, color = Ink.GlassDim, maxLines = 2)
         }
         else -> {
             // the photograph coming out of the character matrix, as far as the engine has really got
@@ -354,23 +359,45 @@ private fun Details(job: PrintJob, desk: PrintDesk, close: () -> Unit) {
                     GlyphSubject.Picture(small, come), Modifier.fillMaxWidth().height(168.dp),
                     cell = 8.dp, strength = 0.9f,
                 )
-                Gap(height = 12.dp)
+                Gap(height = 14.dp)
             }
-            Txt("正在冲印", Type.heading)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Txt(
+                    if (state is PrintJob.State.Waiting) "排在前一张后面" else STAGES[job.stage.coerceIn(0, STAGES.lastIndex)],
+                    Type.body, Modifier.weight(1f), color = Ink.Accent,
+                )
+                Txt("长边 ${job.longEdge}", Type.numSmall, color = Ink.GlassDim)
+            }
             Gap(height = 6.dp)
-            Txt("${job.frame.name}   $film   长边 ${job.longEdge}", Type.label, color = Ink.Dim, maxLines = 2)
-            Gap(height = 4.dp)
-            Txt(
-                if (state is PrintJob.State.Waiting) "排在前一张后面" else STAGES[job.stage.coerceIn(0, STAGES.lastIndex)],
-                Type.label, color = Ink.Amber,
-            )
-            Gap(height = 4.dp)
-            Txt("冲印在后台进行，可以继续调整或回到片库。", Type.label, color = Ink.Dim, maxLines = 2)
-            Gap(height = 16.dp)
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Pill("停止冲印", { close(); desk.stop(job) }, Modifier.weight(1f), danger = true)
-                Pill("收起", close, Modifier.weight(1f))
-            }
+            Txt("${job.frame.name} · $film", Type.numSmall, color = Ink.GlassDim, maxLines = 2)
+            Gap(height = 8.dp)
+            Txt("冲印在后台进行，可以接着调别的照片，离开冲印室也会做完。", Type.label, color = Ink.GlassDim, maxLines = 2)
+        }
+    }
+}
+
+/** What can be done about the print the sheet is showing. */
+@Composable
+private fun RowScope.DetailsFoot(job: PrintJob, desk: PrintDesk, close: () -> Unit) {
+    val context = LocalContext.current
+    when (val state = job.state) {
+        is PrintJob.State.Done -> {
+            Btn("分享", {
+                context.startActivity(
+                    Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).setType(context.contentResolver.getType(state.printed.uri) ?: "image/*")
+                            .putExtra(Intent.EXTRA_STREAM, state.printed.uri)
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                        null,
+                    ),
+                )
+            }, Modifier.weight(1f), icon = Glyph.Share)
+            Btn("好", { close(); desk.dismiss(job) }, Modifier.weight(1f), BtnKind.Key)
+        }
+        is PrintJob.State.Failed -> Btn("知道了", { close(); desk.dismiss(job) }, Modifier.weight(1f))
+        else -> {
+            Btn("停止冲印", { close(); desk.stop(job) }, Modifier.weight(1f), BtnKind.Danger)
+            Btn("收起", close, Modifier.weight(1f))
         }
     }
 }

@@ -30,6 +30,7 @@
 #include "lt_preview.hpp"
 #include "parallel.hpp"
 #include "spektra_engine.hpp"
+#include "overscan.hpp"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "latent", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "latent", __VA_ARGS__)
@@ -475,6 +476,42 @@ NATIVE(jstring, display)(JNIEnv* env, jobject, jlong id, jobject bitmap) {
     return error.empty() ? nullptr : jstr(env, error);
 }
 
+// Adjustment workspace: the exact scene and finishing operators, without a
+// stock, auto metering, spectral conversion, film grain, paper, or rebate.
+// The source registry remains immutable, just as it does for full photo proofs.
+NATIVE(jstring, adjustPhoto)(JNIEnv* env, jobject, jlong id, jfloatArray jgrade,
+                             jfloatArray jfinish, jfloatArray jtable, jobject bitmap) {
+    auto img = image(id);
+    float grade[lt::kGradeFloats], finish[lt::kFinishFloats];
+    std::vector<float> table(lt::kFinishTableFloats);
+    if (!img || !read_floats(env, jgrade, grade, lt::kGradeFloats) ||
+        !read_floats(env, jfinish, finish, lt::kFinishFloats) ||
+        !read_floats(env, jtable, table.data(), lt::kFinishTableFloats))
+        return jstr(env, "invalid photo adjustment parameters");
+    AndroidBitmapInfo info{};
+    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS ||
+        info.format != ANDROID_BITMAP_FORMAT_RGBA_8888 || (int)info.width != img->width ||
+        (int)info.height != img->height || info.stride != info.width * 4)
+        return jstr(env, "bitmap does not match the picture");
+    void* pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS)
+        return jstr(env, "bitmap could not be written");
+    std::string error;
+    try {
+        const size_t count = (size_t)img->width * img->height;
+        std::vector<float> adjusted(count * 3), planes[3];
+        lt::grade_image(grade, img->rgb.data(), adjusted.data(), img->width, img->height);
+        for (auto& plane : planes) plane.resize(count);
+        for (size_t i = 0; i < count; ++i)
+            for (int c = 0; c < 3; ++c) planes[c][i] = adjusted[3 * i + c];
+        lt::finish_planes(finish, table.data(), planes[0].data(), planes[1].data(), planes[2].data(),
+                          img->width, img->height, static_cast<uint8_t*>(pixels));
+    } catch (const std::string& e) { error = e; }
+      catch (const std::exception& e) { error = e.what(); }
+    AndroidBitmap_unlockPixels(env, bitmap);
+    return error.empty() ? nullptr : jstr(env, error);
+}
+
 NATIVE(jfloat, meter)(JNIEnv*, jobject, jlong id) {
     auto img = image(id);
     if (!img) return 0.0f;
@@ -648,6 +685,82 @@ NATIVE(jintArray, developSize)(JNIEnv* env, jobject, jint w, jint h, jobjectArra
     jintArray out = env->NewIntArray(2);
     env->SetIntArrayRegion(out, 0, 2, v);
     return out;
+}
+
+// Read-only geometry for UI metering; derived from the very same layout as the print.
+NATIVE(jfloatArray, proofGate)(JNIEnv* env, jobject, jint w, jint h, jobjectArray strings, jfloatArray numbers) {
+    spk::RenderParams p;
+    if (!read_rebate(env, strings, numbers, p) || w<=0 || h<=0) return nullptr;
+    float v[8] = {0,0,1,0,1,1,0,1};
+    try {
+        if (p.overscan.active) {
+            int cx,cy,cw,ch; double mm=0; std::string error;
+            spk::OverscanLayout L;
+            if (!spk::overscan_frame(p.overscan,w,h,cx,cy,cw,ch,mm) ||
+                !spk::overscan_layout(p.overscan,mm/std::max(cw,ch),cw,ch,L,error)) return nullptr;
+            // Stay within the rounded gate, excluding its film border.
+            const double inset=0.65;
+            const double ss[4]={L.gate_s0+inset,L.gate_s0+L.gate_along-inset,L.gate_s0+L.gate_along-inset,L.gate_s0+inset};
+            const double band=L.open?std::min(L.nominal_across,L.film_w):L.gate_across;
+            const double t0=L.open?(L.film_w-band)*0.5:L.gate_t0;
+            const double tt[4]={t0+inset,t0+inset,t0+band-inset,t0+band-inset};
+            const double det=L.A[0]*L.A[3]-L.A[1]*L.A[2];
+            for(int i=0;i<4;i++) {
+                const double ds=ss[i]-L.cs,dt=tt[i]-L.ct;
+                v[2*i]=float(((L.A[3]*ds-L.A[1]*dt)/det+L.cu)/L.px/L.canvas_w);
+                v[2*i+1]=float(((-L.A[2]*ds+L.A[0]*dt)/det+L.cv)/L.px/L.canvas_h);
+            }
+        }
+    } catch (...) { return nullptr; }
+    jfloatArray out=env->NewFloatArray(8);env->SetFloatArrayRegion(out,0,8,v);return out;
+}
+
+// Exact source placement for before/after comparison. Metering's proofGate is
+// inset and follows film axes; neither describes the source bitmap's corners.
+NATIVE(jfloatArray, proofSource)(JNIEnv* env, jobject, jint w, jint h, jobjectArray strings, jfloatArray numbers) {
+    spk::RenderParams p;
+    if (!read_rebate(env, strings, numbers, p) || w<=0 || h<=0) return nullptr;
+    float v[12] = {0,0,1,1,0,0,1,0,1,1,0,1};
+    try {
+        if (p.overscan.active) {
+            int cx,cy,cw,ch; double mm=0; std::string error;
+            spk::OverscanLayout L;
+            if (!spk::overscan_frame(p.overscan,w,h,cx,cy,cw,ch,mm) ||
+                !spk::overscan_layout(p.overscan,mm/std::max(cw,ch),cw,ch,L,error)) return nullptr;
+            v[0]=float(cx)/w; v[1]=float(cy)/h;
+            v[2]=float(cx+cw)/w; v[3]=float(cy+ch)/h;
+            const double xx[4]={0,1,1,0}, yy[4]={0,0,1,1};
+            const double det=L.A[0]*L.A[3]-L.A[1]*L.A[2];
+            for (int i=0;i<4;i++) {
+                // Source boundaries, not pixel centers. Portrait film turns a
+                // quarter turn, so x runs opposite t while y runs along s.
+                const double s=L.gate_s0+(L.vertical?yy[i]:xx[i])*L.gate_along;
+                const double t=L.gate_t0+(L.vertical?1.0-xx[i]:yy[i])*L.gate_across;
+                const double ds=s-L.cs, dt=t-L.ct;
+                v[4+2*i]=float(((L.A[3]*ds-L.A[1]*dt)/det+L.cu)/L.px/L.canvas_w);
+                v[5+2*i]=float(((-L.A[2]*ds+L.A[0]*dt)/det+L.cv)/L.px/L.canvas_h);
+            }
+        }
+    } catch (...) { return nullptr; }
+    jfloatArray out=env->NewFloatArray(12); env->SetFloatArrayRegion(out,0,12,v); return out;
+}
+
+NATIVE(jfloatArray, proofDateBounds)(JNIEnv* env, jobject, jint w, jint h, jfloat long_mm, jobjectArray strings, jfloatArray numbers) {
+    spk::RenderParams p;
+    if (!read_rebate(env,strings,numbers,p) || w<=0 || h<=0 || long_mm<=0) return nullptr;
+    try {
+        spk::OverscanLayout L;
+        int cx=0,cy=0,cw=w,ch=h;double mm=long_mm;std::string error;
+        if (p.overscan.active) {
+            if (!spk::overscan_frame(p.overscan,w,h,cx,cy,cw,ch,mm) ||
+                !spk::overscan_layout(p.overscan,mm/std::max(cw,ch),cw,ch,L,error)) return nullptr;
+        } else {
+            L.px=double(long_mm)/std::max(w,h);L.frame_w=w;L.frame_h=h;L.canvas_w=w;L.canvas_h=h;
+        }
+        float v[4];
+        if (!spk::overscan_date_bounds(L,p.overscan,p.date,cw*L.px,ch*L.px,v)) return nullptr;
+        jfloatArray out=env->NewFloatArray(4);env->SetFloatArrayRegion(out,0,4,v);return out;
+    } catch (...) { return nullptr; }
 }
 
 // The finished print, through the full engine. Source pixels remain immutable;

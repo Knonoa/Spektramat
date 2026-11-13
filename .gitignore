@@ -8,3 +8,4 @@ captures/
 .kotlin/
 __pycache__/
 *.pyc
+dist/

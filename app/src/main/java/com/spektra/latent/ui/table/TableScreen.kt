@@ -26,6 +26,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -70,6 +74,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.spektra.latent.LatentApp
 import com.spektra.latent.data.Frame
@@ -79,7 +84,14 @@ import com.spektra.latent.data.Loupe
 import com.spektra.latent.data.Placement
 import com.spektra.latent.data.TableDoc
 import com.spektra.latent.model.Choice
-import com.spektra.latent.ui.ChoiceStrip
+import com.spektra.latent.ui.*
+import com.spektra.latent.ui.darkroom.TRAY_PAD
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.unit.IntOffset
 import com.spektra.latent.ui.FileImage
 import com.spektra.latent.ui.Gap
 import com.spektra.latent.ui.Glyph
@@ -88,7 +100,6 @@ import com.spektra.latent.ui.GlyphSubject
 import com.spektra.latent.ui.Icon
 import com.spektra.latent.ui.Ink
 import com.spektra.latent.ui.Notice
-import com.spektra.latent.ui.Pill
 import com.spektra.latent.ui.Ruler
 import com.spektra.latent.ui.SettingRow
 import com.spektra.latent.ui.Sheet
@@ -109,6 +120,15 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
+private val EXPORT_RATIOS=listOf(Choice("free","外接矩形"),Choice("1:1","1:1"),Choice("4:5","4:5"),Choice("3:2","3:2"),Choice("16:9","16:9"),Choice("9:16","9:16"))
+private fun exportRatio(id:String):Float? {
+    val pair=id.split(':')
+    if(pair.size!=2)return null
+    val numerator=pair[0].toFloatOrNull()?:return null
+    val denominator=pair[1].toFloatOrNull()?:return null
+    return (numerator/denominator).takeIf {it.isFinite() && it>0f}
+}
+
 private val LAMPS = listOf(
     Choice("3200", "钨丝灯 3200K"), Choice("4000", "暖白 4000K"), Choice("5000", "观片标准 5000K"),
     Choice("5500", "日光 5500K"), Choice("6500", "D65 6500K"),
@@ -124,9 +144,11 @@ private class Target(val id: Long, val loupe: Boolean, val locked: Boolean, val 
  * as a picture.
  */
 @Composable
-fun TableScreen(library: Library, store: LightTableStore, onBack: () -> Unit, onOpen: (Long) -> Unit) {
+fun TableScreen(library: Library, store: LightTableStore, onOpen: (Long) -> Unit) {
     val context = LocalContext.current
     val app = context.applicationContext as LatentApp
+    val shell = LocalShell.current
+    val reduced = LocalReducedMotion.current || animationsOff(context)
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
     val density = LocalDensity.current.density
@@ -144,6 +166,7 @@ fun TableScreen(library: Library, store: LightTableStore, onBack: () -> Unit, on
     var lamp by remember {
         mutableStateOf(Lamp(prefs.getBoolean("on", true), prefs.getFloat("kelvin", 5000f), prefs.getFloat("level", 0.9f)))
     }
+    var ratio by remember { mutableStateOf(prefs.getString("exportRatio","free").takeIf { id->EXPORT_RATIOS.any{it.wire==id} }?:"free") }
     var snap by remember { mutableStateOf(prefs.getBoolean("snap", false)) }
     var selectedPhoto by remember { mutableStateOf<Long?>(null) }
     var selectedLoupe by remember { mutableStateOf<Long?>(null) }
@@ -233,17 +256,17 @@ fun TableScreen(library: Library, store: LightTableStore, onBack: () -> Unit, on
 
     // ---- the window onto the table
     fun fit(animate: Boolean = true) {
-        val b = bounds(doc, shape)
+        val b = exportBounds(doc, shape,exportRatio(ratio))
         if (b == null || size.width == 0) {
             view = View()
             return
         }
         val padTop = 96f * density
-        val padBottom = 150f * density
+        val padBottom = 200f * density
         val s = min((size.width - 48f * density) / b.width, (size.height - padTop - padBottom) / b.height).coerceIn(0.05f, 4f)
         val target = View(-(b.left + b.right) / 2 * s, -(b.top + b.bottom) / 2 * s + (padTop - padBottom) / 2, s)
         gliding?.cancel()
-        if (!animate) {
+        if (!animate || reduced) {
             view = target
             return
         }
@@ -285,19 +308,17 @@ fun TableScreen(library: Library, store: LightTableStore, onBack: () -> Unit, on
         selectedPhoto = selectedPhoto, selectedLoupe = selectedLoupe, guides = guides,
         plainLoupes = glass == null,
     )
-    // a lit table is a bright screen: the clock and the battery are drawn dark over it, and light again on leaving
-    DisposableEffect(lamp.on) {
-        val window = (context as? android.app.Activity)?.window
-        val bars = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
-        bars?.isAppearanceLightStatusBars = lamp.on
-        onDispose { bars?.isAppearanceLightStatusBars = false }
-    }
+    // the table's lamp is this page's theme: over a lit table the glass is light, over a dark one dark
+    PageScheme(light = lamp.on)
 
-    Box(Modifier.fillMaxSize().background(lampColour(lamp)).onSizeChanged { size = it }) {
+    GlassPage(
+        modifier = Modifier.onSizeChanged { size = it },
+        behind = {
+        Box(Modifier.fillMaxSize().background(lampColour(lamp)))
         Canvas(
             Modifier
                 .fillMaxSize()
-                .then(if (Build.VERSION.SDK_INT >= 33 && glass != null) Modifier.glass(glass as RuntimeShader) { scene } else Modifier)
+                .then(if (Build.VERSION.SDK_INT >= 33 && glass != null) Modifier.lenses(glass as RuntimeShader) { scene } else Modifier)
                 .pointerInput(Unit) {
                     var lastTap = 0L
                     awaitEachGesture {
@@ -450,227 +471,234 @@ fun TableScreen(library: Library, store: LightTableStore, onBack: () -> Unit, on
         ) {
             drawTable(scene)
         }
+        exportBounds(shown,shape,exportRatio(ratio))?.let { region ->
+            val start=toScreen(region.topLeft)
+            val width=region.width*view.s
+            val height=region.height*view.s
+            Canvas(Modifier.fillMaxSize()) {
+                val stroke=if(lamp.on)Color.Black.copy(alpha=.35f) else Color.White.copy(alpha=.5f)
+                drawRect(stroke,start,Size(width,height),style=Stroke(1.dp.toPx(),pathEffect=PathEffect.dashPathEffect(floatArrayOf(7.dp.toPx(),5.dp.toPx()))))
+            }
+            Txt("导出范围 · ${EXPORT_RATIOS.first{it.wire==ratio}.label}",Type.micro,
+                Modifier.offset { IntOffset(start.x.roundToInt(),(start.y-21*density).roundToInt()) },
+                color=if(lamp.on)Color.Black.copy(alpha=.55f) else Color.White.copy(alpha=.7f))
+        }
 
         // ---- nothing on the table yet
         if (loaded && doc.placements.isEmpty()) {
-            GlyphField(
-                GlyphSubject.Room, Modifier.fillMaxSize(), strength = 0.55f,
-                ink = Color.Black.copy(alpha = 0.26f), faint = Color.Black.copy(alpha = 0.12f), spark = Color.Black.copy(alpha = 0.5f),
-            )
-            Column(Modifier.align(Alignment.Center).padding(horizontal = 40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                val ink = if (lamp.on) Color(0xFF121316) else Ink.Text
-                Txt("一张没有边的观片台", Type.heading, color = ink)
-                Gap(height = 8.dp)
+            val grain = if (lamp.on) Color.Black.copy(alpha = .5f) else Color.White.copy(alpha = .5f)
+            GlyphField(GlyphSubject.Room, Modifier.fillMaxSize(), noise = .14f, ink = grain, hot = grain)
+        }
+        },
+        chrome = {
+        val onTable = if (lamp.on) Color(0xFF17150F) else Ink.OnPhoto
+        if (loaded && doc.placements.isEmpty()) {
+            Column(Modifier.align(Alignment.Center).padding(start = 40.dp + shell.insetLeft, end = 40.dp, bottom = 80.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Txt("一张没有边的观片台", Type.h1, color = onTable)
+                Gap(height = 10.dp)
                 Txt(
-                    "把片库里的照片摊开来看，\n拖动、放大、转个角度；\n再放一枚放大镜，透过玻璃看细节。", Type.label,
-                    color = ink.copy(alpha = 0.7f), maxLines = 3, align = androidx.compose.ui.text.style.TextAlign.Center,
+                    "把片库里的照片摊开来看，\n拖动、放大、转个角度；\n再放一枚放大镜，透过玻璃看细节。", Type.body.copy(lineHeight = 24.5.sp),
+                    color = onTable.copy(alpha = .7f), maxLines = 3, align = androidx.compose.ui.text.style.TextAlign.Center,
                 )
                 Gap(height = 22.dp)
-                Pill("放照片上来", { picked = emptySet(); picking = true }, filled = true, enabled = frames.isNotEmpty())
+                Btn("放照片上来", { picked = emptySet(); picking = true }, kind = BtnKind.Key, icon = Glyph.Plus, enabled = frames.isNotEmpty())
                 if (frames.isEmpty()) {
-                    Gap(height = 8.dp)
-                    Txt("片库里还没有照片。", Type.caption, color = ink.copy(alpha = 0.6f))
+                    Gap(height = 10.dp)
+                    Txt("片库里还没有照片。", Type.micro, color = onTable.copy(alpha = .6f))
                 }
             }
         }
 
-        // ---- top: the way out, what lies here, the lamp, undo, saving a picture of it
-        Row(
-            Modifier.fillMaxWidth().statusBarsPadding().height(60.dp).padding(horizontal = 10.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Knob(Glyph.Back, "回到冲印室", true, onClick = onBack)
-            Box(Modifier.clip(RoundedCornerShape(50)).background(GLASS).padding(horizontal = 14.dp, vertical = 9.dp)) {
-                Txt(if (doc.placements.isEmpty()) "观片台" else "${doc.placements.size} 张照片", Type.label)
-            }
-            Box(Modifier.weight(1f))
-            Knob(Glyph.Lamp, if (lamp.on) "关灯" else "开灯", true, lit = lamp.on) {
-                lamp = lamp.copy(on = !lamp.on)
-                prefs.edit().putBoolean("on", lamp.on).apply()
-            }
-            history.let { Knob(Glyph.Undo, "撤销", undone.isNotEmpty()) { step(undone, redone) } }
-            history.let { Knob(Glyph.Redo, "重做", redone.isNotEmpty()) { step(redone, undone) } }
-            Box(
-                Modifier.pressable(enabled = !exporting && doc.placements.isNotEmpty()) { exportOpen = true }
-                    .clip(RoundedCornerShape(50)).background(Ink.Amber).padding(horizontal = 16.dp, vertical = 9.dp),
-            ) {
-                Txt(if (exporting) "正在导出" else "导出", Type.label, color = Color.Black)
-            }
-        }
+        // ---- top: where this is, undo, saving a picture of it
+        TopBar(
+            title = "观片台",
+            sub = if (doc.placements.isEmpty()) "" else "${doc.placements.size} 张在台上",
+            actions = {
+                history.let { IconButton(Glyph.Undo, "撤销", { step(undone, redone) }, enabled = undone.isNotEmpty()) }
+                history.let { IconButton(Glyph.Redo, "重做", { step(redone, undone) }, enabled = redone.isNotEmpty()) }
+                BarSep()
+                IconButton(Glyph.Share, if (exporting) "正在导出" else "导出", { exportOpen = true }, enabled = !exporting && doc.placements.isNotEmpty())
+            },
+        )
         hud?.let {
-            Box(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 70.dp).clip(RoundedCornerShape(50)).background(GLASS).padding(horizontal = 12.dp, vertical = 5.dp)) {
-                Txt(it, Type.edge)
-            }
+            Box(
+                Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(start = shell.insetLeft, top = GAP + 54.dp + 10.dp)
+                    .glass(15.dp, GlassTone.Thin, shadow = false).padding(horizontal = 12.dp, vertical = 5.dp),
+            ) { Txt(it, Type.num, color = Ink.GlassText) }
         }
 
-        // ---- bottom: a panel for the thing being set, and the tools
-        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 12.dp)) {
+        // ---- bottom: what can be done with the thing that is chosen, a panel for what is being set, and the tools
+        Column(
+            Modifier.align(Alignment.BottomCenter).padding(start = GAP + shell.insetLeft, end = GAP, bottom = GAP + bottomInset()).widthIn(max = 520.dp).fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             val photo = doc.placements.firstOrNull { it.id == selectedPhoto }
             val loupe = doc.loupes.firstOrNull { it.id == selectedLoupe }
+            if (photo != null || loupe != null) {
+                Row(Modifier.glass(27.dp, shadow = false).height(54.dp).padding(horizontal = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (photo != null) {
+                        IconButton(Glyph.Front, "置顶", {
+                            commit(doc.copy(placements = doc.placements.map { if (it.id == photo.id) it.copy(z = (doc.placements.maxOf { p -> p.z }) + 1) else it }))
+                        })
+                        IconButton(Glyph.Lock, if (photo.locked) "解锁" else "锁定", {
+                            commit(doc.copy(placements = doc.placements.map { if (it.id == photo.id) it.copy(locked = !it.locked) else it }))
+                        }, on = photo.locked)
+                        IconButton(Glyph.Turn, "旋转", { panel = if (panel == "turn") null else "turn" }, enabled = !photo.locked, on = panel == "turn")
+                        IconButton(Glyph.Darkroom, "去冲印", { onOpen(photo.frameId) })
+                        BarSep()
+                        IconButton(Glyph.Trash, "从台上拿走", {
+                            select(null, null)
+                            commit(doc.copy(placements = doc.placements.filter { it.id != photo.id }))
+                        }, tint = Ink.Rec)
+                    } else if (loupe != null) {
+                        IconButton(Glyph.Trash, "拿走放大镜", {
+                            select(null, null)
+                            commit(doc.copy(loupes = doc.loupes.filter { it.id != loupe.id }))
+                        }, tint = Ink.Rec)
+                        IconButton(Glyph.Check, "好了", { select(null, null) })
+                    }
+                }
+            }
             when {
                 panel == "lamp" -> Panel {
-                    SettingRow("背光", if (lamp.on) "照片被灯从背后照亮。" else "关了灯，底片只映着屋里的暗光。") {
+                    Ctl("背光", note = if (lamp.on) "照片被灯从背后照亮。" else "关了灯，底片只映着屋里的暗光。", trailing = {
                         Toggle(lamp.on, { lamp = lamp.copy(on = it); prefs.edit().putBoolean("on", it).apply() }, "背光")
+                    })
+                    Ctl("色温", value = "${lamp.kelvin.roundToInt()}K", valueSet = lamp.kelvin != 5000f) {
+                        Chips(LAMPS.opts(), lamp.kelvin.roundToInt().toString(), {
+                            lamp = lamp.copy(kelvin = it.toFloat())
+                            prefs.edit().putFloat("kelvin", lamp.kelvin).apply()
+                        }, bleed = TRAY_PAD, height = 32.dp)
+                        Gap(height = 8.dp)
+                        Ruler("色温", lamp.kelvin, 2700f, 9300f, 100f, 5000f, { lamp = lamp.copy(kelvin = it) }, { prefs.edit().putFloat("kelvin", lamp.kelvin).apply() }, origin = 5000f)
                     }
-                    ChoiceStrip(LAMPS, lamp.kelvin.roundToInt().toString(), {
-                        lamp = lamp.copy(kelvin = it.toFloat())
-                        prefs.edit().putFloat("kelvin", lamp.kelvin).apply()
-                    }, Modifier.padding(vertical = 4.dp))
-                    Ruler(
-                        name = "色温", value = lamp.kelvin, min = 2700f, max = 9300f, step = 100f, major = 1000f, default = 5000f,
-                        label = { "${it.roundToInt()}K" },
-                        onChange = { lamp = lamp.copy(kelvin = it) }, onSettled = { prefs.edit().putFloat("kelvin", lamp.kelvin).apply() },
-                    )
-                    Ruler(
-                        name = "亮度", value = lamp.level * 100f, min = 20f, max = 100f, step = 1f, major = 10f, default = 90f,
-                        label = { "${it.roundToInt()}%" },
-                        onChange = { lamp = lamp.copy(level = it / 100f) }, onSettled = { prefs.edit().putFloat("level", lamp.level).apply() },
-                    )
+                    Ctl("亮度", value = "${(lamp.level * 100f).roundToInt()}%", valueSet = (lamp.level * 100f).roundToInt() != 90) {
+                        Ruler("亮度", lamp.level * 100f, 20f, 100f, 1f, 90f, { lamp = lamp.copy(level = it / 100f) }, { prefs.edit().putFloat("level", lamp.level).apply() }, sticky = false)
+                    }
                 }
                 panel == "turn" && photo != null -> Panel {
                     val shownRot = normAngle((doc.with(delta).placements.firstOrNull { it.id == photo.id } ?: photo).rot)
-                    Ruler(
-                        name = "角度", value = shownRot, min = -180f, max = 180f, step = 1f, major = 15f, default = 0f,
-                        label = { (if (it > 0) "+" else "") + "${it.roundToInt()}°" },
-                        onChange = { delta = Delta(photo.id, false, rotation = snapAngle(it) - photo.rot) },
-                        onSettled = { delta?.let { d -> delta = null; commit(doc.with(d)) } },
-                    )
-                    Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
-                        fun turnTo(deg: Float) = commit(doc.copy(placements = doc.placements.map { if (it.id == photo.id) it.copy(rot = normAngle(deg)) else it }))
-                        Pill("左转 90°", { turnTo((kotlin.math.ceil(shownRot / 90f) - 1f) * 90f) })
-                        Pill("摆正", { turnTo(0f) }, enabled = shownRot != 0f)
-                        Pill("右转 90°", { turnTo((kotlin.math.floor(shownRot / 90f) + 1f) * 90f) })
+                    Ctl("角度", value = (if (shownRot > 0) "+" else "") + "${shownRot.roundToInt()}°", valueSet = shownRot != 0f) {
+                        Ruler(
+                            "角度", shownRot, -180f, 180f, 1f, 0f,
+                            { delta = Delta(photo.id, false, rotation = snapAngle(it) - photo.rot) },
+                            { delta?.let { d -> delta = null; commit(doc.with(d)) } },
+                        )
+                        Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
+                            fun turnTo(deg: Float) = commit(doc.copy(placements = doc.placements.map { if (it.id == photo.id) it.copy(rot = normAngle(deg)) else it }))
+                            Btn("左转 90°", { turnTo((kotlin.math.ceil(shownRot / 90f) - 1f) * 90f) }, size = BtnSize.Small)
+                            Btn("摆正", { turnTo(0f) }, size = BtnSize.Small, enabled = shownRot != 0f)
+                            Btn("右转 90°", { turnTo((kotlin.math.floor(shownRot / 90f) + 1f) * 90f) }, size = BtnSize.Small)
+                        }
                     }
                 }
                 loupe != null -> Panel {
-                    Ruler(
-                        name = "放大倍率", value = loupe.zoom, min = 1.2f, max = 12f, step = 0.1f, major = 1f, default = 2.5f,
-                        label = { String.format(java.util.Locale.US, "%.1f×", it) },
-                        onChange = { z -> doc = doc.copy(loupes = doc.loupes.map { if (it.id == loupe.id) it.copy(zoom = z) else it }) },
-                        onSettled = { keep(doc) },
-                    )
+                    Ctl("放大倍率", value = String.format(java.util.Locale.US, "%.1f×", loupe.zoom), valueSet = loupe.zoom != 2.5f) {
+                        Ruler(
+                            "放大倍率", loupe.zoom, 1.2f, 12f, .1f, 2.5f,
+                            { z -> doc = doc.copy(loupes = doc.loupes.map { if (it.id == loupe.id) it.copy(zoom = z) else it }) }, { keep(doc) }, sticky = false,
+                        )
+                    }
                 }
             }
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(GLASS).pointerInput(Unit) { }
-                    .padding(horizontal = 6.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+            Column(
+                Modifier.fillMaxWidth().glass(28.dp).pointerInput(Unit) { }.padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                when {
-                    photo != null -> {
-                        Tool(Glyph.Turn, "旋转", on = panel == "turn", enabled = !photo.locked) { panel = if (panel == "turn") null else "turn" }
-                        Tool(Glyph.Front, "置顶") {
-                            commit(doc.copy(placements = doc.placements.map { if (it.id == photo.id) it.copy(z = (doc.placements.maxOf { p -> p.z }) + 1) else it }))
-                        }
-                        Tool(Glyph.Lock, if (photo.locked) "已锁定" else "锁定", on = photo.locked) {
-                            commit(doc.copy(placements = doc.placements.map { if (it.id == photo.id) it.copy(locked = !it.locked) else it }))
-                        }
-                        Tool(Glyph.Film, "冲洗") { onOpen(photo.frameId) }
-                        Tool(Glyph.Trash, "拿走", danger = true) {
-                            select(null, null)
-                            commit(doc.copy(placements = doc.placements.filter { it.id != photo.id }))
-                        }
+                // what an export would contain is drawn on the table as a dashed frame; this sets its shape
+                Row(Modifier.fillMaxWidth().padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Txt("导出比例", Type.label.copy(fontSize = 12.sp), color = Ink.GlassDim)
+                    Chips(EXPORT_RATIOS.opts(), ratio, { ratio = it; prefs.edit().putString("exportRatio", it).apply(); fit() }, Modifier.weight(1f), height = 32.dp)
+                }
+                Row(Modifier.fillMaxWidth()) {
+                    Tool(Glyph.Lamp, "背光", on = lamp.on) { panel = if (panel == "lamp") null else "lamp" }
+                    Tool(Glyph.Magnet, "吸附", on = snap) {
+                        snap = !snap
+                        prefs.edit().putBoolean("snap", snap).apply()
+                        notice = if (snap) "吸附开了：拖动的照片会和别的照片对齐，或者落在网格上。" else "吸附关了。"
                     }
-                    loupe != null -> {
-                        Tool(Glyph.Trash, "拿走", danger = true) {
-                            select(null, null)
-                            commit(doc.copy(loupes = doc.loupes.filter { it.id != loupe.id }))
-                        }
-                        Tool(Glyph.Check, "好了") { select(null, null) }
+                    Tool(Glyph.Arrange, "整理", enabled = doc.placements.isNotEmpty()) {
+                        commit(arranged(doc, shape))
+                        fit()
                     }
-                    else -> {
-                        Tool(Glyph.Plus, "照片", enabled = frames.isNotEmpty()) { picked = emptySet(); picking = true }
-                        Tool(Glyph.Loupe, "放大镜", enabled = doc.placements.isNotEmpty() && doc.loupes.size < 6) {
-                            val c = centre()
-                            val id = doc.nextId
-                            commit(doc.copy(loupes = doc.loupes + Loupe(id, c.x, c.y, size = 190f * density / view.s)))
-                            select(null, id)
-                        }
-                        Tool(Glyph.Lamp, "灯光", on = panel == "lamp") { panel = if (panel == "lamp") null else "lamp" }
-                        Tool(Glyph.Magnet, "吸附", on = snap) {
-                            snap = !snap
-                            prefs.edit().putBoolean("snap", snap).apply()
-                            notice = if (snap) "吸附开了：拖动的照片会和别的照片对齐，或者落在网格上。" else "吸附关了。"
-                        }
-                        Tool(Glyph.Arrange, "整理", enabled = doc.placements.isNotEmpty()) {
-                            commit(arranged(doc, shape))
-                            fit()
-                        }
-                        Tool(Glyph.Fit, "全部", enabled = doc.placements.isNotEmpty()) { fit() }
+                    Tool(Glyph.Fit, "看全部", enabled = doc.placements.isNotEmpty()) { fit() }
+                    Tool(Glyph.Loupe, "放大镜", enabled = doc.placements.isNotEmpty() && doc.loupes.size < 6) {
+                        val c = centre()
+                        val id = doc.nextId
+                        commit(doc.copy(loupes = doc.loupes + Loupe(id, c.x, c.y, size = 190f * density / view.s)))
+                        select(null, id)
                     }
+                    Tool(Glyph.Plus, "放照片", enabled = frames.isNotEmpty()) { picked = emptySet(); picking = true }
                 }
             }
         }
+        },
+    )
+    Notice(notice, { notice = null })
 
-        Notice(notice, { notice = null }, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 110.dp))
-
-        // ---- choosing photographs from the library
-        Sheet(picking, { picking = false }) {
-            Txt("放哪些照片上来", Type.heading)
-            Gap(height = 4.dp)
-            Txt("观片台上的是片库里的同一张底片：在暗房里改了它，这里跟着变。", Type.label, color = Ink.Dim, maxLines = 2)
-            Gap(height = 12.dp)
-            LazyVerticalGrid(
-                GridCells.Adaptive(76.dp), Modifier.fillMaxWidth().heightIn(max = 340.dp),
-                horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                items(rolls.flatMap { it.frames }, key = { it.id }) { f ->
-                    val on = f.id in picked
-                    Box(
-                        Modifier.aspectRatio(1f).pressable { picked = if (on) picked - f.id else picked + f.id }
-                            .border(2.dp, if (on) Ink.Amber else Color.Transparent, RoundedCornerShape(3.dp)),
-                    ) {
-                        FileImage(f.thumb, Modifier.fillMaxSize().clip(RoundedCornerShape(2.dp)))
-                    }
-                }
-            }
-            Gap(height = 12.dp)
-            Pill(if (picked.isEmpty()) "选几张照片" else "放上 ${picked.size} 张", {
+    // ---- choosing photographs from the library
+    Sheet(
+        picking, { picking = false }, title = "放照片到台上",
+        foot = {
+            Btn(if (picked.isEmpty()) "选几张照片" else "放上 ${picked.size} 张", {
                 picking = false
                 val chosen = rolls.flatMap { it.frames }.filter { it.id in picked }
                 commit(placed(doc, chosen, centre(), view))
                 fitted = true
                 scope.launch { delay(60); fit() }
-            }, Modifier.fillMaxWidth(), filled = true, enabled = picked.isNotEmpty())
-        }
-
-        // ---- saving a picture of the table
-        Sheet(exportOpen, { exportOpen = false }) {
-            Txt("把观片台存成一张图", Type.heading)
-            Gap(height = 4.dp)
-            Txt("存下来的和看到的一样，带着灯光和色温；不带网格点和选择框。保存到相册的 ${APP_NAME} 相簿。", Type.label, color = Ink.Dim, maxLines = 3)
-            Gap(height = 12.dp)
-            for ((all, title, note) in listOf(Triple(false, "当前窗口", "屏幕上现在看到的这一块"), Triple(true, "全部照片", "台上所有的照片，四周留一点边"))) {
-                Column(
-                    Modifier.fillMaxWidth().pressable {
-                        exportOpen = false
-                        exporting = true
-                        val d = doc
-                        val v = view
-                        val l = lamp
-                        val window = size
-                        app.scope.launch {
-                            notice = try {
-                                val (w, h) = export(context, library, d, frames, shape, l, v, window, all, glass != null)
-                                "已保存到相册：$w × $h"
-                            } catch (e: OutOfMemoryError) {
-                                "内存不够导出这么大的一张，换「当前窗口」再试。"
-                            } catch (e: Exception) {
-                                "没有导出：${e.message ?: "出了点问题"}"
-                            }
-                            exporting = false
-                        }
-                    }.padding(vertical = 12.dp),
+            }, Modifier.weight(1f), BtnKind.Key, enabled = picked.isNotEmpty())
+        },
+    ) {
+        Txt("观片台上的是片库里的同一张底片：在暗房里改了它，这里跟着变。", Type.micro.copy(lineHeight = 17.6.sp), color = Ink.GlassDim, maxLines = 2)
+        Gap(height = 12.dp)
+        LazyVerticalGrid(
+            GridCells.Adaptive(88.dp), Modifier.fillMaxWidth().heightIn(max = 340.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            items(rolls.flatMap { it.frames }.sortedByDescending { it.taken }, key = { it.id }) { f ->
+                val on = f.id in picked
+                Box(
+                    Modifier.aspectRatio(1f)
+                        .clickable(remember { MutableInteractionSource() }, indication = null) { picked = if (on) picked - f.id else picked + f.id }
+                        .border(2.dp, if (on) Ink.Amber else Color.Transparent),
                 ) {
-                    Txt(title, Type.body)
-                    Txt(note, Type.caption)
+                    FileImage(f.thumb, Modifier.fillMaxSize().padding(if (on) 2.dp else 0.dp))
                 }
             }
         }
     }
-}
 
-private val GLASS = Color(0xE6161616)
+    // ---- saving a picture of the table
+    Sheet(exportOpen, { exportOpen = false }, title = "导出") {
+        Txt("存下来的和看到的一样，带着灯光和色温；不带网格点和选择框。保存到相册的 ${APP_NAME} 相簿。", Type.micro.copy(lineHeight = 17.6.sp), color = Ink.GlassDim, maxLines = 3)
+        Gap(height = 14.dp)
+        fun save(all: Boolean) {
+            exportOpen = false
+            exporting = true
+            val d = doc
+            val v = view
+            val l = lamp
+            val window = size
+            val aspect = exportRatio(ratio)
+            app.scope.launch {
+                notice = try {
+                    val (w, h) = export(context, library, d, frames, shape, l, v, window, all, glass != null, aspect)
+                    "已保存到相册：$w × $h"
+                } catch (e: OutOfMemoryError) {
+                    "内存不够导出这么大的一张，换「只导出现在看到的窗口」再试。"
+                } catch (e: Exception) {
+                    "没有导出：${e.message ?: "出了点问题"}"
+                }
+                exporting = false
+            }
+        }
+        Btn("导出虚线框内的全部照片", { save(true) }, Modifier.fillMaxWidth(), BtnKind.Key)
+        Gap(height = 4.dp)
+        Txt("所有照片 · ${EXPORT_RATIOS.first { it.wire == ratio }.label}", Type.micro, Modifier.fillMaxWidth(), color = Ink.GlassDim, align = androidx.compose.ui.text.style.TextAlign.Center)
+        Gap(height = 12.dp)
+        Btn("只导出现在看到的窗口", { save(false) }, Modifier.fillMaxWidth())
+    }
+}
 
 /** New photographs in a row across the middle of the window, each a comfortable size on screen. */
 private fun placed(doc: TableDoc, frames: List<Frame>, centre: Offset, view: View): TableDoc {
@@ -687,41 +715,30 @@ private fun placed(doc: TableDoc, frames: List<Frame>, centre: Offset, view: Vie
     return doc.copy(placements = doc.placements + added)
 }
 
-/** A round button on a dark glass disc: readable over a bright table. */
+/** One of the table's tools: an icon over its name; lit when what it switches is on. */
 @Composable
-private fun Knob(glyph: Glyph, label: String, enabled: Boolean, lit: Boolean = false, onClick: () -> Unit) {
-    Box(
-        Modifier.size(40.dp).clip(RoundedCornerShape(50)).background(GLASS).pressable(enabled, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(glyph, tint = if (lit) Ink.Amber else Ink.Text, size = 22.dp)
-    }
-}
-
-@Composable
-private fun Tool(glyph: Glyph, label: String, on: Boolean = false, enabled: Boolean = true, danger: Boolean = false, onClick: () -> Unit) {
-    val tint = if (danger) Ink.Red else if (on) Ink.Amber else Ink.Text
+private fun RowScope.Tool(glyph: Glyph, label: String, on: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
     Column(
-        Modifier.pressable(enabled, onClick = onClick).padding(horizontal = 8.dp, vertical = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+        Modifier.weight(1f).pressable(enabled, sink = .94f, onClick = onClick).clip(RoundedCornerShape(14.dp))
+            .semantics { contentDescription = label }.padding(top = 8.dp, bottom = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        Icon(glyph, tint = tint, size = 22.dp)
-        Gap(height = 3.dp)
-        Txt(label, Type.caption, color = tint)
+        Icon(glyph, tint = if (on) Ink.Accent else Ink.GlassText, size = 21.dp)
+        Txt(label, Type.micro.copy(lineHeight = 14.sp), color = if (on) Ink.Accent else Ink.GlassDim)
     }
 }
 
+/** A plate of glass over the tools, holding the settings of the thing being set. */
 @Composable
 private fun Panel(content: @Composable () -> Unit) {
-    Column(
-        Modifier.fillMaxWidth().padding(bottom = 8.dp).clip(RoundedCornerShape(18.dp)).background(GLASS)
-            .pointerInput(Unit) { }.padding(horizontal = 14.dp, vertical = 10.dp),
-    ) { content() }
+    Column(Modifier.fillMaxWidth().glass(24.dp, GlassTone.Strong).pointerInput(Unit) { }.padding(horizontal = TRAY_PAD, vertical = 4.dp)) {
+        CtlColumn(Modifier.fillMaxWidth(), content)
+    }
 }
 
 /** The loupes as glass: the whole table is drawn into a layer and the lens shader bends what it shows. */
 @RequiresApi(33)
-private fun Modifier.glass(shader: RuntimeShader, scene: () -> Scene): Modifier =
+private fun Modifier.lenses(shader: RuntimeShader, scene: () -> Scene): Modifier =
     graphicsLayer {
         val s = scene()
         val lenses = s.lenses(Size(size.width, size.height)).take(6)
@@ -759,21 +776,21 @@ private fun lensShader(): Any? {
  */
 private suspend fun export(
     context: Context, library: Library, doc: TableDoc, frames: Map<Long, Frame>, shape: Shapes,
-    lamp: Lamp, view: View, window: IntSize, all: Boolean, glass: Boolean,
+    lamp: Lamp, view: View, window: IntSize, all: Boolean, glass: Boolean, ratio:Float?,
 ): Pair<Int, Int> = withContext(Dispatchers.Default) {
     val x0: Float
     val y0: Float
     val x1: Float
     val y1: Float
     if (all) {
-        val b = bounds(doc, shape) ?: throw IOException("观片台是空的")
-        val m = max(60f, 0.06f * max(b.width, b.height))
-        x0 = b.left - m; y0 = b.top - m; x1 = b.right + m; y1 = b.bottom + m
+        val b=exportBounds(doc,shape,ratio)?:throw IOException("观片台是空的")
+        x0=b.left;y0=b.top;x1=b.right;y1=b.bottom
     } else {
         x0 = (-window.width / 2f - view.x) / view.s; x1 = (window.width / 2f - view.x) / view.s
         y0 = (-window.height / 2f - view.y) / view.s; y1 = (window.height / 2f - view.y) / view.s
     }
-    val longEdge = if (all) 4096 else min(4096, max(window.width, window.height) * 2)
+    val requested=context.getSharedPreferences("appearance",Context.MODE_PRIVATE).getInt("exportEdge",3072)
+    val longEdge=if(all)requested else min(requested,max(window.width,window.height)*2)
     val k = longEdge / max(x1 - x0, y1 - y0)
     val w = max(1, ((x1 - x0) * k).roundToInt())
     val h = max(1, ((y1 - y0) * k).roundToInt())
