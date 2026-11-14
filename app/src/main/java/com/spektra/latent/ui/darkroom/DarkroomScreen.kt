@@ -193,7 +193,11 @@ fun Darkroom(
     LaunchedEffect(run?.over) {
         val done = job
         if (run != null && run.over && done != null) {
-            if (run.failed == null) overlays?.toast("已存入相册", "${done.longEdge} px")
+            if (run.failed == null) {
+                val printed = (done.state as? PrintJob.State.Done)?.printed
+                if (printed?.inGallery != false) overlays?.toast("已存入相册", "${done.longEdge} px")
+                else overlays?.toast("已存入应用目录", "这台手机的相册没有收下它，从片库可以分享 · ${done.longEdge} px")
+            }
             job = null
         }
     }
