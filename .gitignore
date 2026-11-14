@@ -1,5 +1,6 @@
 .gradle/
 build/
+!engine/src/main/cpp/third_party/libtiff/build/
 local.properties
 *.iml
 .idea/
