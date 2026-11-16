@@ -48,12 +48,12 @@ class DarkroomProofTest {
         var stateCreated = false
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         fun onMain(action: () -> Unit) = instrumentation.runOnMainSync(action)
-        fun waitForProof() {
+        fun waitForProof(exact: Boolean = true) {
             val deadline = SystemClock.uptimeMillis() + 90_000
             while (SystemClock.uptimeMillis() < deadline) {
                 var done = false
                 var failure: String? = null
-                onMain { done = state.ready && !state.proofing; failure = state.failure }
+                onMain { done = state.ready && !state.proofing && (!exact || state.exact); failure = state.failure }
                 assertNull(failure)
                 if (done) return
                 SystemClock.sleep(25)
@@ -94,7 +94,7 @@ class DarkroomProofTest {
                         state.showAdjustmentsOnly(false)
                         state.showAdjustmentsOnly(true)
                     }
-                    waitForProof()
+                    waitForProof(exact = false)
                     onMain { actual = state.proof!!.asAndroidBitmap() }
                     val adjusted = FilmEngine.adjustPhoto(source, finalLook.grade(0f), finalLook.finish(), finalLook.finishTable())
                     try {
@@ -102,7 +102,7 @@ class DarkroomProofTest {
                         val b = IntArray(adjusted.width * adjusted.height)
                         actual.getPixels(a, 0, actual.width, 0, 0, actual.width, actual.height)
                         adjusted.getPixels(b, 0, adjusted.width, 0, 0, adjusted.width, adjusted.height)
-                        assertArrayEquals("Adjustment tab must show the adjusted source", b, a)
+                        assertDisplayClose("Adjustment tab must show the adjusted source", b, a)
                     } finally { adjusted.recycle() }
 
                     // Continue editing after entering the adjustment tab. The
@@ -112,7 +112,7 @@ class DarkroomProofTest {
                         state.change(exposure.set(state.look, -1.25f))
                         state.commit()
                     }
-                    waitForProof()
+                    waitForProof(exact = false)
                     onMain {
                         assertTrue(state.adjustmentsOnly)
                         finalLook = state.look
@@ -127,7 +127,7 @@ class DarkroomProofTest {
                         val b = IntArray(editedAdjustment.width * editedAdjustment.height)
                         actual.getPixels(a, 0, actual.width, 0, 0, actual.width, actual.height)
                         editedAdjustment.getPixels(b, 0, editedAdjustment.width, 0, 0, editedAdjustment.width, editedAdjustment.height)
-                        assertArrayEquals("A committed edit in the adjustment tab must update the adjusted source", b, a)
+                        assertDisplayClose("A committed edit in the adjustment tab must update the adjusted source", b, a)
                     } finally { editedAdjustment.recycle() }
 
                     // Returning to another tab must restore the complete film
@@ -158,5 +158,15 @@ class DarkroomProofTest {
             scope.cancel()
             file.delete()
         }
+    }
+
+    private fun assertDisplayClose(message: String, expected: IntArray, actual: IntArray) {
+        assertEquals(message, expected.size, actual.size)
+        val maximum = expected.indices.maxOf { i ->
+            maxOf(kotlin.math.abs(Color.red(expected[i]) - Color.red(actual[i])),
+                kotlin.math.abs(Color.green(expected[i]) - Color.green(actual[i])),
+                kotlin.math.abs(Color.blue(expected[i]) - Color.blue(actual[i])))
+        }
+        assertTrue("$message; GPU rounding differs by $maximum display codes", maximum <= 1)
     }
 }

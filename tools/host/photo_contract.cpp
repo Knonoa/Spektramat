@@ -19,7 +19,7 @@ void check(bool ok, const char* label) {
 
 struct Result {
     bool ok = false;
-    std::vector<float> exposed, printed;
+    std::vector<float> exposed, printed, output;
     std::vector<uint8_t> rgba;
 };
 
@@ -31,7 +31,8 @@ Result render(const spk::EngineContext& ctx, const std::vector<float>& rgb, int 
     std::string error;
     spk::TapFn tap = [&](const char* name, const float* r, const float* g, const float* b, int tw, int th) {
         auto* out = !std::strcmp(name, "log_e_film") ? &result.exposed
-                  : !std::strcmp(name, "log_e_print") ? &result.printed : nullptr;
+                  : !std::strcmp(name, "log_e_print") ? &result.printed
+                  : !std::strcmp(name, "rgb_out_linear") ? &result.output : nullptr;
         if (!out) return;
         out->resize((size_t)tw * th * 3);
         for (size_t i = 0; i < (size_t)tw * th; ++i) {
@@ -147,6 +148,28 @@ int main(int argc, char** argv) {
     cached.drop_caches();
     check(cached.render(rgb.data(), w, h, 42, p, cached_rgba.data(), error, nullptr, progress, true) && exposures == 4,
           "explicit memory-pressure clear drops the negative cache");
+
+    spk::RenderParams white;
+    white.auto_exposure = white.print_exposure_compensation = false;
+    white.halation_active = white.dir_couplers_active = white.grain_active =
+        white.glare_active = white.unsharp_mask = false;
+    std::vector<float> bright((size_t)w * h * 3, 1e6f);
+    const auto material_white = render(ctx, bright, w, h, white);
+    white.scanner_white_correction = true;
+    white.scanner_white_level = 1;
+    const auto scan_white = render(ctx, bright, w, h, white);
+    white.scanner_full_white_extension = true;
+    const auto extended_white = render(ctx, bright, w, h, white);
+    auto luminance = [](const Result& result) {
+        return result.output.empty() ? 0.0 :
+            .2126 * result.output[0] + .7152 * result.output[1] + .0722 * result.output[2];
+    };
+    std::printf("WHITE original=%.9f scanner=%.9f full=%.9f\n", luminance(material_white),
+        luminance(scan_white), luminance(extended_white));
+    check(material_white.ok && scan_white.ok && extended_white.ok &&
+        std::abs(luminance(extended_white) - 1.0) < .01 &&
+        luminance(extended_white) > luminance(material_white),
+        "full extension reaches final material white after output roll-off");
 
     std::printf("PHOTO_CONTRACT_FAILURES %d\n", failures);
     return failures ? 1 : 0;

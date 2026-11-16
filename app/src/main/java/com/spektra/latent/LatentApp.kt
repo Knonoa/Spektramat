@@ -6,6 +6,7 @@ import com.spektra.latent.data.LightTableStore
 import com.spektra.latent.tether.Monitor
 import com.spektra.latent.data.PrintDesk
 import com.spektra.latent.data.Recipes
+import com.spektra.latent.data.PhotoProxyStore
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.gl.GlCore
 import com.spektra.latent.update.UpdateManager
@@ -39,6 +40,16 @@ class LatentApp : Application() {
 
     private val _startup = MutableStateFlow<Startup>(Startup.Loading)
     val startup: StateFlow<Startup> = _startup
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) PhotoProxyStore.trimSharedMemory()
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        PhotoProxyStore.trimSharedMemory()
+    }
 
     override fun onCreate() {
         super.onCreate()

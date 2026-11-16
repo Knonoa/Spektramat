@@ -2,6 +2,7 @@ package com.spektra.latent.data
 
 import android.content.Context
 import com.spektra.latent.engine.PhotoPixels
+import com.spektra.latent.engine.DevelopCancelled
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -9,7 +10,9 @@ import java.nio.ByteOrder
 /** Lossless float TIFF for wide-gamut/linear prints; samples keep their output
  * encoding and may be negative or above white. The ICC identifies both. */
 internal object FloatTiff {
-    fun write(context: Context, image: PhotoPixels, output: OutputStream) {
+    fun write(context: Context, image: PhotoPixels, output: OutputStream, shouldStop: () -> Boolean = { false }) {
+        fun checkStopped() { if (shouldStop()) throw DevelopCancelled() }
+        checkStopped()
         val model = image.model
         val key = when (model.outputColorSpace) {
             "Display P3" -> "p3"
@@ -58,6 +61,7 @@ internal object FloatTiff {
         val pixels = image.pixels().asFloatBuffer()
         val row = ByteBuffer.allocate(image.width * 12).order(ByteOrder.LITTLE_ENDIAN)
         for (y in 0 until image.height) {
+            checkStopped()
             row.clear()
             for (x in 0 until image.width) for (c in 0..2) {
                 row.putFloat(pixels[(y * image.width + x) * 3 + c])

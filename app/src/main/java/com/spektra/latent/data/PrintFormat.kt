@@ -1,8 +1,8 @@
 package com.spektra.latent.data
 
-/** Float32 output is the default; JPEG is an explicit sharing conversion. */
-enum class PrintFormat(val label: String, val note: String) {
-    AUTO("自动", "保留精度，保存 32 位浮点 TIFF"),
-    JPEG("JPEG", "8 位 sRGB 分享副本；仅在最终编码时转换"),
-    FLOAT_TIFF("浮点 TIFF", "32 位浮点，保留输出色彩空间、编码和 ICC"),
+/** File conversion happens only after full-resolution floating-point rendering. */
+enum class PrintFormat(val label: String, val note: String, val extension: String, val mime: String) {
+    JPEG("JPEG", "默认格式，8 位 sRGB，便于相册查看和分享", "jpg", "image/jpeg"),
+    PNG("PNG", "16 位无损成片，保留输出色域并嵌入 ICC", "png", "image/png"),
+    DNG("DNG", "32 位浮点线性成片，已应用调节与胶片效果；需兼容软件", "dng", "image/x-adobe-dng"),
 }

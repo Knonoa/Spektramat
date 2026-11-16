@@ -186,19 +186,24 @@ fun Darkroom(
     BackHandler(enabled = collapsed) { collapsed = false }
 
     // ---- a print of this photograph, and the run that shows it being made
-    var job by remember(frame.id) { mutableStateOf<PrintJob?>(null) }
-    val run = rememberPrintRun(job)
+    val job = prints.workbenchJob(frame.id)
+    val run = rememberPrintRun(job, pictureReady = state.proof != null || state.failure != null)
     val printing = job != null && run != null && !run.over
     LaunchedEffect(state, step, printing) { state.showAdjustmentsOnly(step == Step.Tone && !printing) }
-    LaunchedEffect(run?.over) {
+    LaunchedEffect(state, step, printing) { state.previewActivity(step == Step.Film || step == Step.Print, printing) }
+    LaunchedEffect(job?.id, run?.over) {
         val done = job
         if (run != null && run.over && done != null) {
             if (run.failed == null) {
                 val printed = (done.state as? PrintJob.State.Done)?.printed
-                if (printed?.inGallery != false) overlays?.toast("已存入相册", "${done.longEdge} px")
-                else overlays?.toast("已存入应用目录", "这台手机的相册没有收下它，从片库可以分享 · ${done.longEdge} px")
+                if (printed != null) {
+                    val size = "${printed.width} × ${printed.height} px"
+                    if (printed.inGallery && done.format == PrintFormat.DNG) overlays?.toast("DNG 已保存", "需兼容 DNG 的软件查看 · $size")
+                    else if (printed.inGallery) overlays?.toast("已存入相册", size)
+                    else overlays?.toast("已存入应用目录", "从成片面板可以分享 · $size")
+                }
             }
-            job = null
+            run.acknowledged = true
         }
     }
     // a photograph that has just arrived comes out of the characters
@@ -356,7 +361,7 @@ fun Darkroom(
     val wanted = if (requested <= 0) native else requested.coerceAtMost(native)
     val sizes = remember(native, wanted) { (listOf(2048, 3072, 4096).filter { it < native } + wanted + native).distinct().sorted() }
     var edge by remember(frame.id, wanted) { mutableStateOf(wanted) }
-    var format by remember { mutableStateOf(PrintFormat.AUTO) }
+    var format by remember { mutableStateOf(PrintFormat.JPEG) }
     Sheet(
         ordering, { ordering = false }, title = "冲印",
         foot = {
@@ -365,7 +370,9 @@ fun Darkroom(
                 state.commit()
                 state.compare(false)
                 state.fit()
-                library.frame(frame.id)?.let { job = prints.order(it, state.look, edge, format) }
+                library.frame(frame.id)?.let {
+                    prints.order(it, state.look, edge, format).animation.attached = true
+                }
             }, Modifier.weight(1f), BtnKind.Key)
         },
     ) {

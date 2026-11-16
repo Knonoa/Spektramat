@@ -52,6 +52,7 @@ import com.spektra.latent.model.Finishing
 import com.spektra.latent.model.Format
 import com.spektra.latent.model.Look
 import com.spektra.latent.model.Shooting
+import com.spektra.latent.model.WhitePoint
 import com.spektra.latent.ui.Btn
 import com.spektra.latent.ui.BtnSize
 import com.spektra.latent.ui.Chip
@@ -181,7 +182,7 @@ internal fun PrintPanel(host: LookHost, frame: Frame?) {
     val look = host.look
     if (FilmEngine.catalog.film(look.film)?.positive == true) {
         Note("反转片不用印相：冲出来的胶片本身就是成片。")
-        WhitePointSwitch(host)
+        WhitePointControl(host)
         return
     }
     Switch("直接扫描底片", look.scan, { host.set(host.look.copy(scan = it)) }, "不经过相纸，直接看底片扫描的结果。")
@@ -193,24 +194,29 @@ internal fun PrintPanel(host: LookHost, frame: Frame?) {
         )
     }
     for (c in Controls.print) if (c.id != "glare") Scale(host, c)
-    WhitePointSwitch(host)
+    WhitePointControl(host)
 }
 
 /**
- * The scanner's own white calibration: the reference scan keeps the paper's
- * white (about 82% on Portra Endura); this lifts the brightest print tone to
- * the scanner's white point. Off by default, as the reference renders. The
- * engine applies it to paper prints and to slide-film scans; a negative
- * looked at directly has no white to calibrate, and that branch never shows
- * this control.
+ * The material's measured white or the full output white. This does not meter
+ * the scene; existing custom scanner targets remain until a mode is chosen.
+ * Paper prints and slide scans support this calibration; direct negative
+ * scans do not have a reference white and do not show this control.
  */
 @Composable
-private fun WhitePointSwitch(host: LookHost) {
-    Switch(
-        "白位校正", host.look.model.scannerWhiteCorrection,
-        { host.set(host.look.copy(model = host.look.model.copy(scannerWhiteCorrection = it))) },
-        "把相纸或反转片的白位拉到扫描白点，整体提亮高光；与参考扫描的输出略有差异。",
-    )
+private fun WhitePointControl(host: LookHost) {
+    Ctl("白位") {
+        Seg(
+            WhitePoint.entries.map { Opt(it.id, it.label) }, host.look.whitePoint?.id,
+            { id -> host.set(host.look.copy(whitePoint = WhitePoint.entries.first { it.id == id })) },
+            Modifier.fillMaxWidth(), block = true,
+        )
+    }
+    Note(if (host.look.whitePoint == null)
+        "此配方保留旧版自定义扫描白位。选择挡位后改用新的白位定义。"
+    else if (host.look.whitePoint == WhitePoint.Expanded)
+        "按胶片或相纸的参考白位扩展至输出白点，保留浮点高光和阴影；不会按照片内容自动曝光。"
+    else "保留算法原始的纸白或片白，具体亮度随材料变化。")
 }
 
 // ------------------------------------------------------------------ 质感

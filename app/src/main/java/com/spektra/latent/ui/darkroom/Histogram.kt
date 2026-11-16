@@ -118,11 +118,17 @@ private fun soften(src: FloatArray): FloatArray = FloatArray(256) { k ->
 internal fun Histogram(image: ImageBitmap, original: Boolean, gate: FloatArray, dateBounds: FloatArray, modifier: Modifier = Modifier, adjustedSource: Boolean = false) {
     var data by remember { mutableStateOf<HistogramData?>(null) }
     LaunchedEffect(image, gate) {
+        kotlinx.coroutines.delay(100) // sample only the latest frame after a burst of slider events
         data = withContext(Dispatchers.Default) {
             val bitmap = image.asAndroidBitmap()
-            // Copying also normalises a float/wide-colour proof to displayed sRGB bytes.
-            val srgb = android.graphics.Bitmap.createBitmap(bitmap.width, bitmap.height, android.graphics.Bitmap.Config.ARGB_8888)
-            android.graphics.Canvas(srgb).drawBitmap(bitmap, 0f, 0f, null)
+            // The instrument reads displayed proxy pixels, independently of
+            // the original/float master. Bound its sampling cost during edits.
+            val scale = minOf(1f, 320f / maxOf(bitmap.width, bitmap.height))
+            val width = (bitmap.width * scale).toInt().coerceAtLeast(1)
+            val height = (bitmap.height * scale).toInt().coerceAtLeast(1)
+            val srgb = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+            android.graphics.Canvas(srgb).drawBitmap(bitmap, null, android.graphics.Rect(0, 0, width, height),
+                android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
             try {
                 val p = IntArray(srgb.width * srgb.height)
                 srgb.getPixels(p, 0, srgb.width, 0, 0, srgb.width, srgb.height)

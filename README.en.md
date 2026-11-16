@@ -4,9 +4,9 @@
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 ![Android 8.0+](https://img.shields.io/badge/Android-8.0%2B-3DDC84.svg)
-[![Preview](https://img.shields.io/badge/Release-Preview-orange.svg)](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.2)
+[![Preview](https://img.shields.io/badge/Release-Preview-orange.svg)](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3)
 
-[中文](README.md) · English · **[Download Android preview](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.2)** · [Watch the introduction](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
+[中文](README.md) · English · **[Download Android preview](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3)** · [Watch the introduction](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
 
 [![Spektramat: a spectral film darkroom for Android](docs/media/spektramat-cover.jpg)](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
 
@@ -26,7 +26,7 @@ Five stages take the original toward your finished photograph:
 
 - **See the correction first.** The Adjustments tab shows changes on the original; move to the following stages to assess the film and print result.
 - **Keep a look you love.** Save recipes, select multiple photos and apply or print in batches. Undo/redo, automatic saving, a histogram and original-image comparison support careful adjustments.
-- **Take the print with you.** Render the full-resolution original to float32 TIFF with a matching ICC profile by default, or explicitly choose an 8-bit sRGB JPEG sharing copy. The date back can be enabled independently of film edges.
+- **Take the print with you.** Render the full-resolution original to gallery-friendly JPEG by default, or choose 16-bit lossless PNG with a matching output-space ICC profile or a 32-bit floating-point linear DNG print that retains highlight and shadow range. The date back can be enabled independently of film edges.
 
 ## Make room for the photograph
 
@@ -48,7 +48,7 @@ Adjust in portrait, or turn the phone to place the photograph beside its control
 
 The complete photo engine models film and paper using **81 wavelength samples**. Source corrections lead into film exposure and development, then spectral printing, scanning and finishing. Slide film or direct scanning can bypass the paper stage; enabled grain, halation and other effects participate in photo processing.
 
-**Photos use the full engine; camera live view uses a GPU color LUT.** The workbench's later-stage previews, film thumbnails and final prints run the complete photo engine, using smaller input images for previews. Photo film/print/scan conversion does not rely on a simplified color 3D LUT; the reference algorithm's own spectral reconstruction tables remain part of the calculation.
+**GPU LUTs for quick editing; the complete engine for final photographs.** The workbench shares an unprocessed float32 linear proxy with a 1280-pixel long edge. Film/paper swatches use 128-pixel samples and cached 33³ LUTs baked by the full engine. Interactive edits reuse GPU color conversion; idle work can refine the cube to 65³ and produce a full-engine proof including spatial effects. Export rereads the original and runs the complete film, print and scan algorithm.
 
 **Finished photographs are not automatically metered again.** The workbench, thumbnails and final prints retain the source exposure baseline, so white-studio, high-key and low-key scenes are not automatically pulled toward middle grey. Use **Adjustments → Exposure** to change brightness; print exposure compensation is also disabled so manual EV remains visible in the output. Fixed grey-card calibration for film and paper remains enabled, and each stock's tone and highlight response still affect the result.
 
@@ -58,28 +58,34 @@ Live view and video use LUTs baked from the complete per-pixel film, print and s
 
 The Adjustments tab is a source-correction preview without film, paper, grain, film edges or dates. Reduced previews and full-size output can differ with sampling scale; random textures are not guaranteed to match Python pixel for pixel. Pinned upstream revisions, asset hashes and completed deterministic/distribution checks are documented in the [algorithm validation record](docs/算法对齐验证-2026-11-12.zh-CN.md), [GPU viewfinder notes](docs/相机GPU实时预览-2026-11-12.zh-CN.md) and [video LUT notes](docs/视频LUT实现与验证-2026-11-12.zh-CN.md) (Chinese).
 
+**Two white-point modes.** Original retains the material's paper or film white. Full extension maps the material reference white to the output white point, independently of the photograph's brightest pixel. Floating-point processing retains negative and above-white values; screen display and JPEG/PNG encoding have their own range limits. Existing custom white targets remain intact until a new mode is selected.
+
+See the [workbench preview implementation record](docs/工作台快速预览实施记录-2026-11-16.zh-CN.md) (Chinese) for proxy caching, LUT approximation limits and export storage behavior.
+
 ## Make your first print
 
 Requires **Android 8.0+ and OpenGL ES 3.0**. Current builds include `arm64-v8a` and `x86_64`, without 32-bit ARM.
 
-1. Download and install **`Spektramat-v0.1.0-preview.2.apk`** from the [Release Assets](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.2).
+1. Download and install **`Spektramat-v0.1.0-preview.3.apk`** from the [Release Assets](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3).
 2. Open “冲印室” (Darkroom) and import from the gallery, files or another app. JPEG, 8/16-bit PNG, supported TIFF and RAW files are accepted. HEIF/AVIF are temporarily refused when no precision-preserving decoder is available.
-3. Work through **调节 → 胶片 → 质感 → 放大机 → 片边** (Adjustments → Film → Texture → Enlarger → Film Edge), then tap “冲印” (Print) to select a size and Auto, JPEG or floating-point TIFF format.
+3. Work through **调节 → 胶片 → 质感 → 放大机 → 片边** (Adjustments → Film → Texture → Enlarger → Film Edge), then tap “冲印” (Print) to select a size and JPEG (default), PNG or DNG format.
 
-On Android 10 and newer, MediaStore saves prints to the gallery under `Pictures/Spektramat`. Android 8/9 uses private `files/prints` storage with export through sharing. Camera, microphone and photo permissions are requested as features need them.
+On Android 10 and newer, MediaStore saves prints under `Pictures/Spektramat`. JPEG and PNG are gallery-friendly; DNG needs a compatible viewer. Android 8/9 uses private `files/prints` storage with export through sharing. Camera, microphone and photo permissions are requested as features need them.
 
 <details>
 <summary>Preview identity and compatibility</summary>
 
-This release uses a **debug-signed APK**: application ID `com.spektra.latent.dev`, in-app version `0.1.0-preview.2-dev`, Release tag `v0.1.0-preview.2`. It can coexist with the release package `com.spektra.latent`; updates require the same application ID and signing key.
+This release uses a **debug-signed APK**: application ID `com.spektra.latent.dev`, in-app version `0.1.0-preview.3-dev`, Release tag `v0.1.0-preview.3`. It can coexist with the release package `com.spektra.latent`; updates require the same application ID and signing key.
 
-This revision passed 17 photo precision, exposure, workbench and GPU checks on an API 31 emulator. The vivo V2454DA rejected the current installation request, so this revision has not completed physical-device validation. Hardware JPEG/RAW capture, video encoding stability and Sony USB tethering still need further testing with this version; there is no fixed frame-rate or universal device-compatibility guarantee. Full processing takes time and memory. Some advanced upstream parameters, custom color spaces and illuminants have no UI controls yet. TIFF samples are written directly from float32 rendering, without an F16 display buffer. Formats without a precision-preserving decoder produce an explicit error.
+Photo precision, exposure, proxy and GPU checks have run on Android emulators. The implementation notes record the latest export-format and job-resume checks; physical-device validation of this revision is still pending. Hardware JPEG/RAW capture, video encoding stability and Sony USB tethering still need further testing with this version; there is no fixed frame-rate or universal device-compatibility guarantee. Full processing takes time and memory. Some advanced upstream parameters, custom color spaces and illuminants have no UI controls yet. Processing stays in float32. DNG stores linear floating-point samples without an F16 display buffer; JPEG and PNG convert to their file ranges and bit depths only during final encoding. Formats without a precision-preserving decoder produce an explicit error.
 
 On Android 10 and newer, the Sony monitor can copy extra originals to `Download/Spektramat` and save monitor recordings to `Movies/Spektramat`. On Android 8/9, monitor recordings use app-specific storage; copying originals to the public Downloads folder is unavailable.
 
 Please report your device, Android version, reproduction steps and screenshots in [Issues](https://github.com/Knonoa/Spektramat/issues). Include a shareable sample and recipe for image-processing problems when possible.
 
 </details>
+
+JPEG uses 8-bit sRGB; PNG uses lossless 16-bit encoding with an ICC profile matching the output color space and encoding. DNG contains the finished film-processed image as 32-bit linear floats, preserving negative and above-white samples. It does not recreate camera sensor RAW, and viewers may apply their own exposure or tone mapping. Auto and TIFF are no longer output options; TIFF input remains supported.
 
 ## How originals and projects are kept
 
@@ -115,7 +121,7 @@ Code is released under **[GNU GPL v3](LICENSE)**. Third-party data and component
 | **Andrea Volpato / [spektrafilm](https://github.com/andreavolpato/spektrafilm)** | Film process model and measured profiles. Profiles, derived LUTs and related encoded assets use **CC BY-SA 4.0**; see the [attribution notice](engine/src/main/assets/licenses/spektrafilm/NOTICE.txt), [license](engine/src/main/assets/licenses/spektrafilm/CC-BY-SA-4.0.txt) and [provenance/change record](engine/src/main/assets/licenses/spektrafilm/CHANGELOG.txt). |
 | **[SpektraLab](https://github.com/JamesQiu2005/SpektraLab)** | Native reference implementation and product film/paper assets, with its [GPL v3 license](engine/src/main/assets/licenses/SpektraLab/GPL-3.0.txt) retained. Additional monochrome profiles are credited to **Hanze Qiu**. |
 | **[LibRaw](https://www.libraw.org/), [libgphoto2](https://github.com/gphoto/libgphoto2), stb** | RAW decoding (LGPL / CDDL), Sony PTP protocol reference and image utilities. |
-| **[Little CMS 2.17](https://github.com/mm2/Little-CMS), [LibTIFF 4.7.0](https://libtiff.gitlab.io/libtiff/)** | Native ICC floating-point colour conversion and TIFF 8/16-bit integer or 32-bit float samples. Export never passes through an F16 or 8-bit display buffer. |
+| **[Little CMS 2.17](https://github.com/mm2/Little-CMS), [LibTIFF 4.7.0](https://libtiff.gitlab.io/libtiff/)** | Native ICC floating-point colour conversion and TIFF 8/16-bit integer or 32-bit float samples. Floating-point DNG export bypasses F16 and 8-bit display buffers; JPEG/PNG convert only during final encoding. |
 | **TeX Gyre Heros, DejaVu Sans Mono** | Film-edge fonts under the GUST Font License and DejaVu font license respectively. |
 
 Full notices are in [licenses](engine/src/main/assets/licenses/), [fonts](engine/src/main/assets/fonts/), the [stb license](engine/src/main/cpp/third_party/STB_LICENSE), and the [Little CMS / LibTIFF licenses](engine/src/main/assets/licenses/). Redistribution must preserve copyright and data attribution, and provide source as required by applicable licenses.

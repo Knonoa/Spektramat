@@ -9,6 +9,31 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PhotoModelTest {
+    @Test fun whitePointModesUseMaterialReferenceAndPreserveLegacyRecipes() {
+        val original = Look(whitePoint = WhitePoint.Original,
+            model = PhotoModel(scannerWhiteCorrection = true, scannerWhiteLevel = .95f))
+        assertFalse(original.order(1L).model.scannerWhiteCorrection)
+        val expanded = original.copy(whitePoint = WhitePoint.Expanded)
+        assertTrue(expanded.order(1L).model.scannerWhiteCorrection)
+        assertEquals(1f, expanded.order(1L).model.scannerWhiteLevel, 0f)
+        assertTrue(expanded.photoOrder(1L).model.scannerWhiteCorrection)
+        assertEquals(1f, expanded.photoOrder(1L).model.scannerWhiteLevel, 0f)
+        assertTrue(expanded.photoOrder(1L).model.scannerFullWhiteExtension)
+        assertFalse(expanded.photoOrder(1L).model.autoExposure)
+        assertFalse(expanded.photoOrder(1L).model.printExposureCompensation)
+        val restored = Look.fromJson(expanded.toJson().toString())
+        assertEquals(WhitePoint.Expanded, restored.whitePoint)
+        assertEquals(expanded.order(1L).model, restored.order(1L).model)
+
+        val oldJson = original.toJson().apply { remove("whitePoint") }
+        val legacy = Look.fromJson(oldJson.toString())
+        assertEquals(null, legacy.whitePoint)
+        assertEquals(.95f, legacy.order(1L).model.scannerWhiteLevel, 0f)
+        assertEquals(.95f, legacy.photoOrder(1L).model.scannerWhiteLevel, 0f)
+        assertTrue(legacy.photoOrder(1L).model.scannerWhiteCorrection)
+        assertEquals(null, Look.fromJson(legacy.toJson().toString()).whitePoint)
+    }
+
     @Test fun physicalSettingsSurviveRecipeRoundTrip() {
         val model = PhotoModel(
             densityCurveGamma = 1.17f, cameraLensBlurUm = 13f,

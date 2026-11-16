@@ -377,8 +377,8 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i < np * 4; i++) moved = std::max(moved, std::abs((int)out8[i] - (int)plain8[i]));
             check(moved > 8, "finishing: a real finish changes the picture");
             bool sane = true;
-            for (float v : lin) sane = sane && std::isfinite(v) && v >= 0.0f;
-            check(sane, "finishing: every finished value is finite and not negative");
+            for (float v : lin) sane = sane && std::isfinite(v);
+            check(sane, "finishing: extended float values stay finite without clipping negative channels");
 
             // the print's path (engine planes -> finish_planes) and the thumbnail's (render_fast) are one code
             std::vector<float> pr(np), pg(np), pb(np);

@@ -125,12 +125,24 @@ void orient(std::vector<float>& rgb,int& w,int& h,int orientation) {
     rgb.swap(out); w=ow; h=oh;
 }
 bool dimensions(uint32_t w,uint32_t h) { return w>0 && h>0 && w<=100000 && h<=100000 && (uint64_t)w*h<=256ULL*1024*1024; }
+bool rendered_dng(TIFF* t) {
+    uint16_t photo=0,bits=0,spp=0,format=0;
+    TIFFGetFieldDefaulted(t,TIFFTAG_PHOTOMETRIC,&photo); TIFFGetFieldDefaulted(t,TIFFTAG_BITSPERSAMPLE,&bits);
+    TIFFGetFieldDefaulted(t,TIFFTAG_SAMPLESPERPIXEL,&spp); TIFFGetFieldDefaulted(t,TIFFTAG_SAMPLEFORMAT,&format);
+    uint8_t* version=nullptr; char* software=nullptr; char* model=nullptr;
+    uint32_t icc_size=0; void* icc=nullptr;
+    return photo==34892 && bits==32 && spp==3 && format==SAMPLEFORMAT_IEEEFP &&
+        TIFFGetField(t,TIFFTAG_DNGVERSION,&version) && version && version[0]==1 && version[1]>=4 &&
+        TIFFGetField(t,TIFFTAG_SOFTWARE,&software) && software && std::strcmp(software,"Spektramat")==0 &&
+        TIFFGetField(t,TIFFTAG_UNIQUECAMERAMODEL,&model) && model && std::strcmp(model,"Spektramat Linear Print")==0 &&
+        TIFFGetField(t,TIFFTAG_ICCPROFILE,&icc_size,&icc) && icc && icc_size>0;
+}
 bool tiff_info(TIFF* t,uint32_t& w,uint32_t& h,uint16_t& photo,uint16_t& bits,uint16_t& spp,uint16_t& format,std::string& error) {
     TIFFGetFieldDefaulted(t,TIFFTAG_PHOTOMETRIC,&photo); TIFFGetFieldDefaulted(t,TIFFTAG_BITSPERSAMPLE,&bits);
     TIFFGetFieldDefaulted(t,TIFFTAG_SAMPLESPERPIXEL,&spp); TIFFGetFieldDefaulted(t,TIFFTAG_SAMPLEFORMAT,&format);
     if(!TIFFGetField(t,TIFFTAG_IMAGEWIDTH,&w)||!TIFFGetField(t,TIFFTAG_IMAGELENGTH,&h)||!dimensions(w,h)) { error="invalid TIFF dimensions"; return false; }
     const bool gray=photo==PHOTOMETRIC_MINISBLACK || photo==PHOTOMETRIC_MINISWHITE;
-    if ((photo!=PHOTOMETRIC_RGB && !gray) || spp<(gray?1:3) || spp>16 ||
+    if ((photo!=PHOTOMETRIC_RGB && !gray && !rendered_dng(t)) || spp<(gray?1:3) || spp>16 ||
         !((format==SAMPLEFORMAT_UINT && (bits==8 || bits==16)) || (format==SAMPLEFORMAT_IEEEFP && bits==32))) {
         error="TIFF sample layout is not supported without precision loss"; return false;
     }
@@ -142,7 +154,7 @@ bool decode_tiff(const std::string& path,LinearImage& out,std::string& error) {
     if(!tiff_info(t.get(),w,h,photo,bits,spp,format,error)) return false;
     uint16_t planar=PLANARCONFIG_CONTIG,orientation=1; TIFFGetFieldDefaulted(t.get(),TIFFTAG_PLANARCONFIG,&planar); TIFFGetFieldDefaulted(t.get(),TIFFTAG_ORIENTATION,&orientation);
     if(planar!=PLANARCONFIG_CONTIG && planar!=PLANARCONFIG_SEPARATE) { error="unsupported TIFF planes"; return false; }
-    const bool gray=photo!=PHOTOMETRIC_RGB; const int channels=gray?1:3,bytes=bits/8;
+    const bool gray=photo==PHOTOMETRIC_MINISBLACK || photo==PHOTOMETRIC_MINISWHITE; const int channels=gray?1:3,bytes=bits/8;
     uint16_t extra_count=0; uint16_t* extras=nullptr; int alpha=-1;
     if(TIFFGetField(t.get(),TIFFTAG_EXTRASAMPLES,&extra_count,&extras))
         for(int i=0;i<extra_count;++i) if(extras[i]==EXTRASAMPLE_ASSOCALPHA) { alpha=spp-extra_count+i; break; }
@@ -198,6 +210,12 @@ bool precision_raster(const std::string& path) {
     uint8_t b[8]{}; auto f=std::fopen(path.c_str(),"rb"); if(!f) return false;
     size_t n=std::fread(b,1,8,f); std::fclose(f);
     return tiff_signature(b,n) || (n>=2 && b[0]==255 && b[1]==216) || (n>=4 && std::memcmp(b,"\x89PNG",4)==0);
+}
+bool rendered_linear_dng(const std::string& path) {
+    uint8_t b[8]{}; auto f=std::fopen(path.c_str(),"rb"); if(!f) return false;
+    const size_t n=std::fread(b,1,8,f); std::fclose(f);
+    if(!tiff_signature(b,n)) return false;
+    Tiff t(TIFFOpen(path.c_str(),"r")); return t && rendered_dng(t.get());
 }
 bool raster_probe(const std::string& path,int& width,int& height,std::string& error) {
     Bytes b; if(!read(path,b,error)) return false;

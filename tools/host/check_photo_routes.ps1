@@ -14,7 +14,6 @@ $photos = @(
     'com\spektra\latent\data\Library.kt',
     'com\spektra\latent\data\PrintDesk.kt',
     'com\spektra\latent\tether\Monitor.kt',
-    'com\spektra\latent\ui\Stocks.kt',
     'com\spektra\latent\ui\darkroom\DarkroomState.kt'
 )
 foreach ($relative in $photos) {
@@ -27,16 +26,22 @@ foreach ($relative in $photos) {
         ($text -notmatch '\.photoOrder\s*\(' -or $text -match '\.order\s*\(')) {
         throw "$relative bypasses the saved-photo exposure policy"
     }
-    if ($text -match 'FilmTables\s*\(|PreviewLut\.bake\s*\(' -or
+    if ($text -match 'FilmTables\s*\(|(?<!Photo)PreviewLut\.bake\s*\(' -or
         ($relative -notlike '*Monitor.kt' -and $text -match 'VideoLut\.bake\s*\(')) {
         throw "$relative constructs a table renderer for photographs"
     }
 }
 
+$stocks = Get-Content -LiteralPath (Join-Path $source 'com\spektra\latent\ui\Stocks.kt') -Raw
+if ($stocks -match 'FilmEngine\.develop(?:Float)?\s*\(|Decoder\.decode\s*\(' -or
+    $stocks -notmatch 'PhotoProxyStore' -or $stocks -notmatch 'PhotoLutCache') {
+    throw 'Stock previews must share the floating proxy and cached photo LUTs'
+}
+
 $printer = Get-Content -LiteralPath (Join-Path $source 'com\spektra\latent\data\Printer.kt') -Raw
 if ($printer -notmatch 'Decoder\.decode\(frame\.file, 0,' -or
     $printer -notmatch 'FilmEngine\.developFloat\s*\(' -or
-    $printer -match 'library\.proxy\s*\(') {
+    $printer -match 'library\.proxy\s*\(|PhotoLutCache|PhotoPreviewLut|PhotoProxyStore') {
     throw 'Export must reopen the full original and render directly to float32'
 }
 

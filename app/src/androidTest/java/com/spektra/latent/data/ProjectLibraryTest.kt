@@ -14,6 +14,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.spektra.latent.LatentApp
 import com.spektra.latent.Startup
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -229,6 +230,21 @@ class ProjectLibraryTest {
         assertEquals(selected, library.frame(imported.id)!!.rollId)
         assertEquals("手动指定项目", library.rolls.value.single { it.id == selected }.name)
         assertEquals(listOf(imported.id), library.rolls.value.single { it.id == selected }.frames.map { it.id })
+    }
+
+    @Test fun editsPersistImmediatelyAndOnlyTheLatestThumbnailIsPublished() = runBlocking {
+        val original = importOne(source("async-edit.png", 19))
+        val originalBytes = original.file.readBytes()
+        for (ev in listOf(-1f, 1f, .5f)) {
+            val edited = original.look.copy(exposure = ev)
+            library.saveLook(original.id, edited)
+            assertEquals("Recipe persistence must not wait for thumbnail rendering", edited, library.frame(original.id)!!.look)
+        }
+        val finalFrame = library.frame(original.id)!!
+        assertEquals(original.revision + 3, finalFrame.revision)
+        withTimeout(90_000) { while (!finalFrame.thumb.isFile) delay(25) }
+        assertReadableBitmap(finalFrame.thumb)
+        assertArrayEquals(originalBytes, original.file.readBytes())
     }
 
     @Test fun legacyFlatOriginalPathsStillLoadAndRenderAfterReopening() = runBlocking {

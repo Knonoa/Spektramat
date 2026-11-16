@@ -35,6 +35,7 @@ inline spk::RenderParams video_pointwise_params(spk::RenderParams p) {
     p.exposure_ev = 0;
     p.print_exposure_compensation = false;
     p.scanner_black_correction = p.scanner_white_correction = false;
+    p.scanner_full_white_extension = false;
     p.halation_active = false;
     p.halation.boost_ev = 0;
     p.camera_lens_blur_um = 0;

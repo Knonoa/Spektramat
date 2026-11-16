@@ -617,7 +617,7 @@ private fun ProjectPhotos(
     }
     // ---- printing everything that is selected, each with its own settings
     var edge by remember { mutableStateOf(0) }
-    var format by remember { mutableStateOf(PrintFormat.AUTO) }
+    var format by remember { mutableStateOf(PrintFormat.JPEG) }
     Sheet(
         printing, { printing = false }, title = "冲印这 ${selection.size} 张",
         foot = {

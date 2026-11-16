@@ -8,6 +8,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.pow
 
+/** Material-reference white mapping, independent of the photograph's content. */
+enum class WhitePoint(val id: String, val label: String) {
+    Original("original", "原始白位"),
+    Expanded("expanded", "完整扩展"),
+}
+
 /**
  * Everything the darkroom can change about one photograph, in the order light
  * meets it: the scene (corrections before the film), the film, the print.
@@ -46,6 +52,8 @@ data class Look(
     val glare: Float = 100f,
     /** A negative looked at directly, without paper: the scan of the film is the picture. */
     val scan: Boolean = false,
+    /** Null preserves a pre-mode recipe's custom scanner white until explicitly changed. */
+    val whitePoint: WhitePoint? = WhitePoint.Original,
     // ---- the film outside the frame, and the date back (FilmEdge.kt)
     val edge: Edge = Edge(),
     val date: DateBack = DateBack(),
@@ -131,7 +139,11 @@ data class Look(
         filmFormatMm = Format.of(format).longMm, seed = seed,
         rebate = rebate(shooting, frameSeed, number),
         exposureEv = exposure,
-        model = model,
+        model = when (whitePoint) {
+            WhitePoint.Original -> model.copy(scannerWhiteCorrection = false, scannerFullWhiteExtension = false)
+            WhitePoint.Expanded -> model.copy(scannerWhiteCorrection = true, scannerWhiteLevel = 1f, scannerFullWhiteExtension = true)
+            null -> model
+        },
     )
 
     /**
@@ -142,9 +154,9 @@ data class Look(
      * the stock/paper's fixed grey calibration remains enabled.
      */
     fun photoOrder(seed: Long, shooting: Shooting? = null, frameSeed: Int = 1, number: Int = 0) =
-        order(seed, shooting, frameSeed, number).copy(
-            model = model.copy(autoExposure = false, printExposureCompensation = false),
-        )
+        order(seed, shooting, frameSeed, number).let { order ->
+            order.copy(model = order.model.copy(autoExposure = false, printExposureCompensation = false))
+        }
 
     /** The same look on another stock; the paper stays when it suits the new stock, else the stock's own. */
     fun withFilm(id: String): Look {
@@ -163,6 +175,7 @@ data class Look(
         .put("vibrance", vibrance.toDouble()).put("saturation", saturation.toDouble())
         .put("lensShading", lensShading).put("aspect", aspect)
         .put("film", film).put("format", format).put("scan", scan)
+        .put("whitePoint", whitePoint?.id ?: "legacy")
         .put("edge", edge.toJson()).put("date", date.toJson()).put("halation", halation.toDouble()).put("grain", grain.toDouble())
         .put("interLayer", interLayer.toDouble())
         .put("paper", paper).put("printExposure", printExposure.toDouble())
@@ -205,6 +218,13 @@ data class Look(
             val film = o.optString("film", d.film).takeIf { FilmEngine.catalog.film(it) != null } ?: d.film
             val paper = o.optString("paper", d.paper).takeIf { FilmEngine.catalog.paper(it) != null }
                 ?: FilmEngine.catalog.film(film)?.paper?.takeIf { it.isNotEmpty() } ?: d.paper
+            val model = PhotoModel.fromJson(o.optJSONObject("model"))
+            val whitePoint = when (o.optString("whitePoint")) {
+                WhitePoint.Original.id -> WhitePoint.Original
+                WhitePoint.Expanded.id -> WhitePoint.Expanded
+                "legacy" -> null
+                else -> if (model.scannerWhiteCorrection) null else WhitePoint.Original
+            }
             return Look(
                 exposure = f("exposure", 0f, -5f, 5f),
                 temperature = f("temperature", 0f, -100f, 100f), tint = f("tint", 0f, -100f, 100f),
@@ -217,6 +237,7 @@ data class Look(
                 film = film,
                 format = Format.of(o.optString("format")).id,
                 scan = o.optBoolean("scan", false),
+                whitePoint = whitePoint,
                 edge = Edge.fromJson(o.optJSONObject("edge")),
                 date = DateBack.fromJson(o.optJSONObject("date")),
                 halation = f("halation", 100f, 0f, 200f), grain = f("grain", 100f, 0f, 200f),
@@ -234,7 +255,7 @@ data class Look(
                 gradingBalance = f("gradingBalance", 0f, -100f, 100f),
                 gradingBlending = f("gradingBlending", 50f, 0f, 100f),
                 vignette = f("vignette", 0f, -100f, 100f),
-                model = PhotoModel.fromJson(o.optJSONObject("model")),
+                model = model,
             )
         }
     }

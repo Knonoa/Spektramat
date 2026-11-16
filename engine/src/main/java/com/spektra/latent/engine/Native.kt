@@ -18,6 +18,7 @@ internal object Native {
     external fun decodeFile(path: String, maxEdge: Int, lensShading: Boolean): Long
     external fun fromBitmap(bitmap: Bitmap): Long
     external fun newFloatImage(width: Int, height: Int): Long
+    external fun newProxyImage(width: Int, height: Int, previewOnly: Boolean, lensOpcodes: Int): Long
     external fun scaled(image: Long, maxEdge: Int): Long
     external fun scaledPhoto(image: Long, maxEdge: Int, colorSpace: String, encoded: Boolean): Long
     external fun cropped(image: Long, x: Int, y: Int, w: Int, h: Int): Long
@@ -59,6 +60,11 @@ internal object Native {
         lut: Long, film: String, paper: String, scanFilm: Boolean, look: FloatArray,
         model: FloatArray, size: Int,
     ): String?
+    external fun bakePhotoPreviewLut(lut: Long, film: String, paper: String, scanFilm: Boolean,
+                                     look: FloatArray, model: FloatArray, outputColorSpace: String, size: Int): String?
+    external fun loadPhotoPreviewLut(lut: Long, size: Int, pixels: ByteBuffer): String?
+    external fun renderPhotoPreviewLut(lut: Long, source: Long, grade: FloatArray, exposureEv: Float,
+                                       finish: FloatArray, finishTable: FloatArray, outputToDisplay: FloatArray, out: Bitmap): String?
     external fun meterPreview(image: Long, grade: FloatArray, method: Int): Float
     external fun meterPreviewRgba(rgba: ByteBuffer, width: Int, height: Int, grade: FloatArray, method: Int): Float
     external fun renderPreviewLut(lut: Long, source: Bitmap, grade: FloatArray, autoEv: Float,

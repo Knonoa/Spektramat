@@ -14,9 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -61,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import com.spektra.latent.data.PrintJob
+import com.spektra.latent.data.PrintAnimation
 import com.spektra.latent.ui.Ink
 import com.spektra.latent.ui.LocalReducedMotion
 import com.spektra.latent.ui.ScrambleText
@@ -161,28 +160,21 @@ private object Score {
     val commit = Line(5f, 0f, 5.7f, 1f)                                // 保存: the amber passing over the blocks
 }
 
-/** Where a run is. */
-@Stable
-internal class PrintRunState {
-    /** Step index + how far through it, 0..6. */
-    var position by mutableFloatStateOf(0f)
-    /** Seconds since the run began, for the things that breathe. */
-    var time by mutableFloatStateOf(0f)
-    /** The run's own opacity over the frame: it lets the frame's own picture back through at the end. */
-    var fade by mutableFloatStateOf(1f)
-    /** Over: the foot goes back to what it was. */
-    var over by mutableStateOf(false)
-    var failed by mutableStateOf<String?>(null)
-}
+/** The job retains its timeline while the workbench is not composed. */
+internal typealias PrintRunState = PrintAnimation
 
 /** Walks towards the engine's real progress at a bounded pace: never a jump, and every joint is seen. */
 @Composable
-internal fun rememberPrintRun(job: PrintJob?): PrintRunState? {
+internal fun rememberPrintRun(job: PrintJob?, pictureReady: Boolean): PrintRunState? {
     val context = LocalContext.current
     val quiet = LocalReducedMotion.current || animationsOff(context)
-    val run = remember(job?.id) { if (job == null) null else PrintRunState() }
-    LaunchedEffect(job?.id, quiet) {
+    val run = job?.animation
+    LaunchedEffect(job?.id, quiet, pictureReady) {
         if (job == null || run == null) return@LaunchedEffect
+        run.attached = true
+        // Returning to the workbench reloads its proxy. Keep the saved cursor
+        // until the picture is visible, rather than finishing behind a blank frame.
+        if (run.over || !pictureReady) return@LaunchedEffect
         var last = 0L
         while (true) {
             val now = withFrameNanos { it }
@@ -205,7 +197,7 @@ internal fun rememberPrintRun(job: PrintJob?): PrintRunState? {
             if (state is PrintJob.State.Done && run.position >= N) break
         }
         // the full bar stays a moment while the frame's own picture comes back through
-        val out = Animatable(1f)
+        val out = Animatable(run.fade)
         out.animateTo(0f, tween(if (quiet) 0 else 450)) { run.fade = value }
         run.over = true
     }

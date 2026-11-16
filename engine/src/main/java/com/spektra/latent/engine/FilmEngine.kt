@@ -291,7 +291,7 @@ object FilmEngine {
         private set
 
     /** Changes whenever the pipeline contract or its spectral data changes. */
-    var renderCacheKey: String = "exact-v4-float-photo"
+    var renderCacheKey: String = "exact-v5-float-white-point"
         private set
 
     private var assetsChecked = false
@@ -318,7 +318,7 @@ object FilmEngine {
                 }
                 val actual = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
                 if (actual != expected) return "Spectral asset checksum mismatch"
-                renderCacheKey = "exact-v4-float-photo-${actual.take(12)}"
+                renderCacheKey = "exact-v5-float-white-point-${actual.take(12)}"
                 assetsChecked = true
             } catch (e: Exception) {
                 return "Cannot validate spectral assets: ${e.message}"
@@ -392,6 +392,17 @@ object FilmEngine {
         val image = LinearImage(Native.newFloatImage(width, height))
         try {
             image.pixels().asFloatBuffer().put(rgb)
+            return image
+        } catch (failure: Throwable) { image.close(); throw failure }
+    }
+
+    /** Restores a disposable float32 source proxy without discarding RAW provenance. */
+    fun restoreProxy(width: Int, height: Int, rgb: ByteBuffer, previewOnly: Boolean, lensOpcodes: Int): LinearImage {
+        val count = width.toLong() * height * 3 * 4
+        require(width > 0 && height > 0 && count <= Int.MAX_VALUE && rgb.remaining().toLong() == count)
+        val image = LinearImage(Native.newProxyImage(width, height, previewOnly, lensOpcodes))
+        try {
+            image.pixels().put(rgb.duplicate())
             return image
         } catch (failure: Throwable) { image.close(); throw failure }
     }

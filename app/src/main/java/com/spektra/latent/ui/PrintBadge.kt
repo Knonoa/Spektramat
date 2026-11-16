@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.spektra.latent.data.PrintDesk
 import com.spektra.latent.data.PrintJob
+import com.spektra.latent.data.PrintFormat
 import com.spektra.latent.data.Printed
 import com.spektra.latent.engine.FilmEngine
 import kotlinx.coroutines.delay
@@ -103,16 +104,20 @@ fun PrintOverlay(desk: PrintDesk, activeFrame:Long?=null) {
     val state = job?.state
 
     // a finished print leaves by itself, unless it is being looked at
-    LaunchedEffect(job?.id, state is PrintJob.State.Done, open) {
-        if (job != null && state is PrintJob.State.Done && !open) {
+    val presenting = job != null && (job.animation.awaitingWorkbench ||
+        (activeFrame == job.frame.id && !job.animation.acknowledged))
+    LaunchedEffect(job?.id, state is PrintJob.State.Done, open, presenting) {
+        if (job != null && state is PrintJob.State.Done && !open && !presenting) {
             delay(5000)
             desk.dismiss(job)
         }
     }
     // finished prints that are not the one shown are already in the gallery: nothing more to say about them
-    val passed = jobs.count { it !== job && it.state is PrintJob.State.Done }
+    val passed = jobs.count { it !== job && it.state is PrintJob.State.Done &&
+        !it.animation.awaitingWorkbench && (it.frame.id != activeFrame || it.animation.acknowledged) }
     LaunchedEffect(passed) {
-        if (passed > 0) jobs.filter { it !== job && it.state is PrintJob.State.Done }.forEach(desk::dismiss)
+        if (passed > 0) jobs.filter { it !== job && it.state is PrintJob.State.Done &&
+            !it.animation.awaitingWorkbench && (it.frame.id != activeFrame || it.animation.acknowledged) }.forEach(desk::dismiss)
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -341,7 +346,11 @@ private fun Details(job: PrintJob) {
                 Txt("${state.printed.width} × ${state.printed.height}", Type.numSmall, color = Ink.GlassDim)
             }
             Gap(height = 6.dp)
-            Txt("已经存进相册的 ${APP_NAME} 相簿。", Type.label, color = Ink.GlassDim)
+            val location = if (state.printed.inGallery) {
+                if (job.format == PrintFormat.DNG) "DNG 已保存到 Pictures/${APP_NAME}；请使用兼容 DNG 的软件查看。"
+                else "已经存进相册的 ${APP_NAME} 相簿。"
+            } else "成片已保存在应用内，可通过分享另存；本次未能写入系统相册。"
+            Txt(location, Type.label, color = Ink.GlassDim, maxLines = 3)
         }
         is PrintJob.State.Failed -> {
             Txt(state.reason, Type.body, color = Ink.GlassDim, maxLines = 6)
@@ -385,7 +394,7 @@ private fun RowScope.DetailsFoot(job: PrintJob, desk: PrintDesk, close: () -> Un
             Btn("分享", {
                 context.startActivity(
                     Intent.createChooser(
-                        Intent(Intent.ACTION_SEND).setType(context.contentResolver.getType(state.printed.uri) ?: "image/*")
+                        Intent(Intent.ACTION_SEND).setType(job.format.mime)
                             .putExtra(Intent.EXTRA_STREAM, state.printed.uri)
                             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
                         null,

@@ -68,6 +68,7 @@ import com.spektra.latent.ui.Txt
 import com.spektra.latent.ui.Type
 import com.spektra.latent.ui.glass
 import com.spektra.latent.ui.softShadow
+import com.spektra.latent.ui.pressable
 import kotlin.math.roundToInt
 
 /** A fixed viewport: only its photograph scales; gestures and drawing stay inside its edges. */
@@ -183,6 +184,13 @@ internal fun PhotoStage(
             IconButton(Glyph.Compare, "对比方式：${comparisonMode.label}", { choosingComparison = true }, size = 36.dp, enabled = !printing)
             IconButton(Glyph.Fit, "适合画框", state::fit, size = 36.dp, enabled = !printing)
             Btn(if (expanded) "显示调节" else "查看大图", onExpand, size = BtnSize.Small, enabled = !printing)
+        }
+        if (!state.adjustmentsOnly && !printing && proof != null) {
+            Txt(if (state.exact) "精确校样" else "快速预览 · 点按精确校样", Type.micro,
+                Modifier.align(Alignment.BottomStart).padding(8.dp).pressable(onClick = state::requestExact)
+                    .semantics { contentDescription = "生成精确校样；颗粒、光晕、片边和日期以完整校样及导出为准" }
+                    .glass(10.dp, GlassTone.Thin, shadow = false).padding(horizontal = 8.dp, vertical = 4.dp),
+                color = Ink.GlassDim)
         }
     }
     Sheet(choosingComparison, { choosingComparison = false }, title = "查看原图") {

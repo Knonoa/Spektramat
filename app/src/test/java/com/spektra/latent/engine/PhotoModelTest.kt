@@ -25,6 +25,7 @@ class PhotoModelTest {
             scannerLensBlur = 1.2f, unsharpSigma = .9f, unsharpAmount = .5f,
             scannerBlackCorrection = true, scannerWhiteCorrection = true,
             scannerBlackLevel = .025f, scannerWhiteLevel = .95f,
+            scannerFullWhiteExtension = true,
             printMorph = true, printGamma = 1.2f, printGammaFast = .8f, printGammaSlow = 1.1f,
             printGammaRgb = listOf(1.1f, .9f, 1.05f), developerExhaustion = .6f,
             outputCctfEncoding = false,
@@ -47,6 +48,19 @@ class PhotoModelTest {
     }
 
     @Test
+    fun schemaTwoRetainsCustomScannerWhiteWithoutAdoptingFullExtension() {
+        val old = PhotoModel(scannerWhiteCorrection = true, scannerWhiteLevel = .93f).toJson()
+        val values = old.getJSONArray("values")
+        values.remove(values.length() - 1)
+        values.put(0, 2)
+        old.put("schema", 2)
+        val restored = PhotoModel.fromJson(old)
+        assertEquals(.93f, restored.scannerWhiteLevel, 0f)
+        assertTrue(restored.scannerWhiteCorrection)
+        assertTrue(!restored.scannerFullWhiteExtension)
+    }
+
+    @Test
     fun originalPhysicalRecipeMigratesWithoutChangingItsFields() {
         val original = PhotoModel(densityCurveGamma = 1.2f, dirDiffusionUm = 80f,
             preflashExposure = .001f, normalizePrintExposure = false)
@@ -58,6 +72,18 @@ class PhotoModelTest {
         val restored = PhotoModel.fromJson(json)
         assertEquals(original, restored)
         assertEquals(PhotoModel.SCHEMA, restored.toJson().getInt("schema"))
+    }
+
+    @Test fun versionTwoRecipesRetainCustomWhiteWithoutEnablingFullExtension() {
+        val model = PhotoModel(scannerWhiteCorrection = true, scannerWhiteLevel = .93f,
+            outputColorSpace = "Display P3", outputGamutAlgorithm = "oklch")
+        val saved = model.toJson()
+        val values = saved.getJSONArray("values")
+        values.remove(values.length() - 1)
+        values.put(0, 2)
+        saved.put("schema", 2)
+        assertEquals(model, PhotoModel.fromJson(saved))
+        assertEquals(3, PhotoModel.fromJson(saved).toJson().getInt("schema"))
     }
 
     @Test

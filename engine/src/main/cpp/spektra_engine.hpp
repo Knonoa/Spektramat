@@ -160,6 +160,7 @@ struct RenderParams {
     std::string output_color_space = "sRGB";
     bool scanner_black_correction = false, scanner_white_correction = false;
     float scanner_black_level = 0.01f, scanner_white_level = 0.98f;
+    bool scanner_full_white_extension = false; // normalize reference white after output mapping, no clamp
     PrintMorphParams print_morph;
     OutputGamutParams output_gamut;
 

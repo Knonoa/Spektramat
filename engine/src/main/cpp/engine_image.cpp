@@ -131,6 +131,7 @@ bool ordinary_raster(const std::string& path) {
 // The one place that decides who develops a RAW file. See engine_image.hpp.
 bool decode_raw(const std::string& path, int max_edge, const DecodeOptions& options, LinearImage& out,
                 std::string& error) {
+    if (rendered_linear_dng(path)) return raster_decode(path,max_edge,out,error);
     spk::raw::DevelopFailure failure = spk::raw::DevelopFailure::none;
     std::string own_error;
     if (spk::raw::develop(path, max_edge, out, own_error, &failure, options)) return true;
@@ -186,6 +187,7 @@ bool supported(const std::string& path) {
 }
 
 bool probe(const std::string& path, int& width, int& height, std::string& error) {
+    if (rendered_linear_dng(path)) return raster_probe(path,width,height,error);
     if (is_raw(path)) {
         // The same order as decode_raw(), so the size reported here is the size
         // the developed image will have.

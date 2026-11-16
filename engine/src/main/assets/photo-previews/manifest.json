@@ -1,0 +1,561 @@
+{
+  "schema": 1,
+  "engineCacheKey": "exact-v5-float-white-point-793208861abb",
+  "size": 33,
+  "type": "float32-le",
+  "shaper": "photo-signed-log-v1",
+  "entries": [
+    {
+      "film": "cinestill_800t",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "original",
+      "file": "cinestill_800t__kodak_2383__print__original.rgb",
+      "sha256": "695c1818d7c6c7868205b8f3ea25608a49aed88b053aa1e2031e48e32a3c87e7"
+    },
+    {
+      "film": "cinestill_800t",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "expanded",
+      "file": "cinestill_800t__kodak_2383__print__expanded.rgb",
+      "sha256": "5a6b14707ee1747b39b06f57946490393cfe2d1e454862df8bf8d3eb57784e36"
+    },
+    {
+      "film": "cinestill_800t",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "cinestill_800t__kodak_portra_endura__print__original.rgb",
+      "sha256": "f4874971d4a544c8152bc28af011a142e59a42317d2577d8fe260c243920461a"
+    },
+    {
+      "film": "cinestill_800t",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "cinestill_800t__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "b316928ea6070fd4ece99f2c95aeebea14c04fb6a339e6e7c45ef126d4c7eebf"
+    },
+    {
+      "film": "fujifilm_c200",
+      "paper": "fujifilm_crystal_archive_typeii",
+      "scan": false,
+      "white": "original",
+      "file": "fujifilm_c200__fujifilm_crystal_archive_typeii__print__original.rgb",
+      "sha256": "cbfca368c8bc4d905da85a536dcfff6cbdf0b21b49b0d7334f350b2a4edb3678"
+    },
+    {
+      "film": "fujifilm_c200",
+      "paper": "fujifilm_crystal_archive_typeii",
+      "scan": false,
+      "white": "expanded",
+      "file": "fujifilm_c200__fujifilm_crystal_archive_typeii__print__expanded.rgb",
+      "sha256": "beecabc4fb7924c73f51ee28bc217c713174be1b82dea6a17e940d1d2056c0e7"
+    },
+    {
+      "film": "fujifilm_c200",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "fujifilm_c200__kodak_portra_endura__print__original.rgb",
+      "sha256": "9d0286e58dea47a53ddbadb7c28d88e6a36f615c39c078bc07fa5ec84d474e26"
+    },
+    {
+      "film": "fujifilm_c200",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "fujifilm_c200__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "fd628035462a75ff96be455217cbd6616687dfad8b029f486179284d32fe5cee"
+    },
+    {
+      "film": "fujifilm_neopan_acros_100_ii",
+      "paper": "ilford_multigrade_iv_rc",
+      "scan": false,
+      "white": "original",
+      "file": "fujifilm_neopan_acros_100_ii__ilford_multigrade_iv_rc__print__original.rgb",
+      "sha256": "591343e01a2054feec8930e564f840c1d844a62858a19f274d825d7362db119d"
+    },
+    {
+      "film": "fujifilm_neopan_acros_100_ii",
+      "paper": "ilford_multigrade_iv_rc",
+      "scan": false,
+      "white": "expanded",
+      "file": "fujifilm_neopan_acros_100_ii__ilford_multigrade_iv_rc__print__expanded.rgb",
+      "sha256": "602c3af28447a1c34f9504d6d097a0d9be645bd62b36970625a2f0158ac50287"
+    },
+    {
+      "film": "fujifilm_pro_400h",
+      "paper": "fujifilm_crystal_archive_typeii",
+      "scan": false,
+      "white": "original",
+      "file": "fujifilm_pro_400h__fujifilm_crystal_archive_typeii__print__original.rgb",
+      "sha256": "d4ecd51b2345b1f8465e88beb196d833aa11bf4588c1237e72893eb6774d3967"
+    },
+    {
+      "film": "fujifilm_pro_400h",
+      "paper": "fujifilm_crystal_archive_typeii",
+      "scan": false,
+      "white": "expanded",
+      "file": "fujifilm_pro_400h__fujifilm_crystal_archive_typeii__print__expanded.rgb",
+      "sha256": "02f16c6c4411e2fd8feffbb2e67dd173d523b7f4b4505d175acc484d90b7655a"
+    },
+    {
+      "film": "fujifilm_pro_400h",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "fujifilm_pro_400h__kodak_portra_endura__print__original.rgb",
+      "sha256": "b3b87249aed90c31d90f056435dd186ff5b583db144bba8f7a690e6541948cb9"
+    },
+    {
+      "film": "fujifilm_pro_400h",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "fujifilm_pro_400h__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "fd761a50e9fe88cb813d9b9285dfff0eb0fa38098fef66d92c727d7db323eab8"
+    },
+    {
+      "film": "fujifilm_provia_100f",
+      "paper": "kodak_portra_endura",
+      "scan": true,
+      "white": "original",
+      "file": "fujifilm_provia_100f__kodak_portra_endura__scan__original.rgb",
+      "sha256": "0599ca98e2762a168593280b0bcec3f91e51c2a3f75b4ba9fca01b4affc07457"
+    },
+    {
+      "film": "fujifilm_provia_100f",
+      "paper": "kodak_portra_endura",
+      "scan": true,
+      "white": "expanded",
+      "file": "fujifilm_provia_100f__kodak_portra_endura__scan__expanded.rgb",
+      "sha256": "67e85d3cc6c2180d560cd16536c5e45176cd5b2999d1711b3d42617fa88fe40c"
+    },
+    {
+      "film": "fujifilm_velvia_100",
+      "paper": "kodak_portra_endura",
+      "scan": true,
+      "white": "original",
+      "file": "fujifilm_velvia_100__kodak_portra_endura__scan__original.rgb",
+      "sha256": "b2f14da805568b6d6eac00b8b74ce5a650237fa7946d3ae574b1b01e51370ebe"
+    },
+    {
+      "film": "fujifilm_velvia_100",
+      "paper": "kodak_portra_endura",
+      "scan": true,
+      "white": "expanded",
+      "file": "fujifilm_velvia_100__kodak_portra_endura__scan__expanded.rgb",
+      "sha256": "eb2416a69a767018a88daa93ce236fb888534def50aeab32855937bd1b1abedf"
+    },
+    {
+      "film": "fujifilm_xtra_400",
+      "paper": "fujifilm_crystal_archive_typeii",
+      "scan": false,
+      "white": "original",
+      "file": "fujifilm_xtra_400__fujifilm_crystal_archive_typeii__print__original.rgb",
+      "sha256": "5ee3414e0aa2e7262e7762c2c9dfe5dd7e5117637e08b2d0ec5cab4148702cbc"
+    },
+    {
+      "film": "fujifilm_xtra_400",
+      "paper": "fujifilm_crystal_archive_typeii",
+      "scan": false,
+      "white": "expanded",
+      "file": "fujifilm_xtra_400__fujifilm_crystal_archive_typeii__print__expanded.rgb",
+      "sha256": "fe186095f51375e48834946384439e1aab4e14075e7afda797cfc33acb75ed64"
+    },
+    {
+      "film": "fujifilm_xtra_400",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "fujifilm_xtra_400__kodak_portra_endura__print__original.rgb",
+      "sha256": "05a2e79eaa9e4636d47a235856e5a37ba0dd9ca9f32c6da187a0734c76824491"
+    },
+    {
+      "film": "fujifilm_xtra_400",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "fujifilm_xtra_400__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "b9b5143bc714c57b52afddffaf80f90676a92e94cbe2810c82b16d93bd4c3347"
+    },
+    {
+      "film": "ilford_hp5_plus_400",
+      "paper": "ilford_multigrade_iv_rc",
+      "scan": false,
+      "white": "original",
+      "file": "ilford_hp5_plus_400__ilford_multigrade_iv_rc__print__original.rgb",
+      "sha256": "23f718db1679a15dec2d8058135e4f5c2239ef9f3356306c083024948c6c72ff"
+    },
+    {
+      "film": "ilford_hp5_plus_400",
+      "paper": "ilford_multigrade_iv_rc",
+      "scan": false,
+      "white": "expanded",
+      "file": "ilford_hp5_plus_400__ilford_multigrade_iv_rc__print__expanded.rgb",
+      "sha256": "1eb4a71f94ac915e2147b6e2fdd447e8a54fa54466adb8075a27a66a89890dab"
+    },
+    {
+      "film": "kodak_ektachrome_100",
+      "paper": "kodak_portra_endura",
+      "scan": true,
+      "white": "original",
+      "file": "kodak_ektachrome_100__kodak_portra_endura__scan__original.rgb",
+      "sha256": "6b7dbc3be9dfbb8ba68f9f78ab28d5aa54e753d2a6173cdab416ca6558dd1346"
+    },
+    {
+      "film": "kodak_ektachrome_100",
+      "paper": "kodak_portra_endura",
+      "scan": true,
+      "white": "expanded",
+      "file": "kodak_ektachrome_100__kodak_portra_endura__scan__expanded.rgb",
+      "sha256": "215dd8012eb94151fa9708d7edd10fa2f81fd64fb1f3562d6cf89a4bb3f695cc"
+    },
+    {
+      "film": "kodak_ektar_100",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_ektar_100__kodak_portra_endura__print__original.rgb",
+      "sha256": "0482b2c8d3a049408275516c6e312a73c7916d547c0abc57fc2f62ef96c91e00"
+    },
+    {
+      "film": "kodak_ektar_100",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_ektar_100__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "620822626449082a4dc51dec0e4730a5e12eae5b9ea9f54e2dabdc7a9a8b9f07"
+    },
+    {
+      "film": "kodak_gold_200",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_gold_200__kodak_portra_endura__print__original.rgb",
+      "sha256": "24b02fb54869d99de7233d0486dfe75f72373b28e66ccfabab5b634f3510cfd0"
+    },
+    {
+      "film": "kodak_gold_200",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_gold_200__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "6598932e67c316f2e4a2a16beb17ff55f0e0b3acbc13451871dec61948ede273"
+    },
+    {
+      "film": "kodak_kodachrome_64",
+      "paper": "kodak_portra_endura",
+      "scan": true,
+      "white": "original",
+      "file": "kodak_kodachrome_64__kodak_portra_endura__scan__original.rgb",
+      "sha256": "b9f1b047b514bda3e83269ce8749d930476434df80a988ba08b88d9e4737a7f3"
+    },
+    {
+      "film": "kodak_kodachrome_64",
+      "paper": "kodak_portra_endura",
+      "scan": true,
+      "white": "expanded",
+      "file": "kodak_kodachrome_64__kodak_portra_endura__scan__expanded.rgb",
+      "sha256": "70caa1e8363766983a6f980189875328abe2e652a3a36d064dbb0a587383dada"
+    },
+    {
+      "film": "kodak_portra_160",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_portra_160__kodak_portra_endura__print__original.rgb",
+      "sha256": "68289db1148d54cce84fb163e498e02d303afb4f0735a891c903614c92affddd"
+    },
+    {
+      "film": "kodak_portra_160",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_portra_160__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "8e9dc91eaa7f6751c5b0b86f135af403bd64b6335c789f9ec607127b9e43a1ae"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "fujifilm_crystal_archive_typeii",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_portra_400__fujifilm_crystal_archive_typeii__print__original.rgb",
+      "sha256": "6f21175c7eb0baf92735ac3804b28b0eb49c91dd0ba96230046c956a5cccf969"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "fujifilm_crystal_archive_typeii",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_portra_400__fujifilm_crystal_archive_typeii__print__expanded.rgb",
+      "sha256": "bb8cee18b27795fab3ef1fc5d00741ebc118fcfaa49985b34a52f8d73ba11459"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "kodak_ektacolor_edge",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_portra_400__kodak_ektacolor_edge__print__original.rgb",
+      "sha256": "b5d5bdc52c178d63fa8ed5244b9c226aeefd77a32ac14ca77fcf5482d1025aa5"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "kodak_ektacolor_edge",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_portra_400__kodak_ektacolor_edge__print__expanded.rgb",
+      "sha256": "8201a6975a83164a7afb252c83dd9b86ea5ca4fb6adbddb056af7963e588d4c7"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "kodak_endura_premier",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_portra_400__kodak_endura_premier__print__original.rgb",
+      "sha256": "e5419b784fd85f54297f66e7dbeca537d2dc59046862d4e3176fcae063045a16"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "kodak_endura_premier",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_portra_400__kodak_endura_premier__print__expanded.rgb",
+      "sha256": "a3ed9f6b653775000ce2d7a018bf2b17cba0d0647d14507d2b1986d1950bcac1"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_portra_400__kodak_portra_endura__print__original.rgb",
+      "sha256": "3e05c2f1eea72de055317ea00cd31d4585fa0a1f1209caffe090a1e72803e034"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_portra_400__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "b0c05df53728562ab1e375771ee6dd16ce83ca7788bb5238660b5687cc568cdb"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "kodak_supra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_portra_400__kodak_supra_endura__print__original.rgb",
+      "sha256": "7dd5eef71803267b018f8061dea7be7ff0f6d175d49b2fa65c49c01b03505f60"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "kodak_supra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_portra_400__kodak_supra_endura__print__expanded.rgb",
+      "sha256": "6980eb983d51d10ffba29c5b3f2750e23abf7e494fe3ce00d3c09d278b964383"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "kodak_ultra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_portra_400__kodak_ultra_endura__print__original.rgb",
+      "sha256": "974fa80bdfda8fa1965c6c9f182b5314f453f2c3fc9a8765cfd676cc05bce93a"
+    },
+    {
+      "film": "kodak_portra_400",
+      "paper": "kodak_ultra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_portra_400__kodak_ultra_endura__print__expanded.rgb",
+      "sha256": "e671b346a86d549aeaefbe99a94527f738f573c23f9b6cb0302ce5e2a0c53188"
+    },
+    {
+      "film": "kodak_portra_800",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_portra_800__kodak_portra_endura__print__original.rgb",
+      "sha256": "17e57c81ba785ebcde4771881ea2ade18fef6de67e0c96b00321d2fcc88929ac"
+    },
+    {
+      "film": "kodak_portra_800",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_portra_800__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "0600e5199593973c7af6b0b83e1f7f8ff38add9356114d98e3c1de7b3473599b"
+    },
+    {
+      "film": "kodak_portra_800_push1",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_portra_800_push1__kodak_portra_endura__print__original.rgb",
+      "sha256": "8b0f22a3aab4cceb965986b4e23ed074821fa7a849abafa1f7a12cb509b2b830"
+    },
+    {
+      "film": "kodak_portra_800_push1",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_portra_800_push1__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "02453ccaa220b1eba17e03c0e2ee16ade246ff83f0ef52d3c014b1d25eacae92"
+    },
+    {
+      "film": "kodak_portra_800_push2",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_portra_800_push2__kodak_portra_endura__print__original.rgb",
+      "sha256": "0ed3e52568dc446c8f2d318503511dd154016e9f808b17057334aadb96a3bce9"
+    },
+    {
+      "film": "kodak_portra_800_push2",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_portra_800_push2__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "39eed95f7f45e8923e57a035e0fee2abb83ba90c51af97c39541f7b6c513fd4d"
+    },
+    {
+      "film": "kodak_tmax_100",
+      "paper": "ilford_multigrade_iv_rc",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_tmax_100__ilford_multigrade_iv_rc__print__original.rgb",
+      "sha256": "149e3eab4c5ac389fd39796df64510eedf3a1e1a80a3cb6a6d8eeb08757c2503"
+    },
+    {
+      "film": "kodak_tmax_100",
+      "paper": "ilford_multigrade_iv_rc",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_tmax_100__ilford_multigrade_iv_rc__print__expanded.rgb",
+      "sha256": "65c337b83d1388d9a43aa2267dffba543d9baec03524634ea0fbd60266134fd8"
+    },
+    {
+      "film": "kodak_tri_x_400",
+      "paper": "ilford_multigrade_iv_rc",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_tri_x_400__ilford_multigrade_iv_rc__print__original.rgb",
+      "sha256": "cf9978a129654703e6a0280b02d0db3b87b43664f65d23bff9b5996f8c19e4c7"
+    },
+    {
+      "film": "kodak_tri_x_400",
+      "paper": "ilford_multigrade_iv_rc",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_tri_x_400__ilford_multigrade_iv_rc__print__expanded.rgb",
+      "sha256": "5e87e1d339feaa59d5d77ecb1051159bddec57d8125e7ed5af25647a76f20e1c"
+    },
+    {
+      "film": "kodak_ultramax_400",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_ultramax_400__kodak_portra_endura__print__original.rgb",
+      "sha256": "5899be0702efcc01218b0d173c63ddcfdbac760d14541b97ed558a2444626a75"
+    },
+    {
+      "film": "kodak_ultramax_400",
+      "paper": "kodak_portra_endura",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_ultramax_400__kodak_portra_endura__print__expanded.rgb",
+      "sha256": "6b0f1fd3506971729e5286ab46d1d5f98c04d1df1cd540b42ef1bae62358948d"
+    },
+    {
+      "film": "kodak_verita_200d",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_verita_200d__kodak_2383__print__original.rgb",
+      "sha256": "d9c7df5d2422f802968ea65e1332bf265a216f68a0154446c04a4fd022481b76"
+    },
+    {
+      "film": "kodak_verita_200d",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_verita_200d__kodak_2383__print__expanded.rgb",
+      "sha256": "8a2aabe826cc0aebd1714f716714516bd384af834261507205be73043c16abdf"
+    },
+    {
+      "film": "kodak_vision3_200t",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_vision3_200t__kodak_2383__print__original.rgb",
+      "sha256": "9100f8d4e3422d9f0e2c7bd9fd2b77ec157816154f09e9fc6fb6050f67cd7e03"
+    },
+    {
+      "film": "kodak_vision3_200t",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_vision3_200t__kodak_2383__print__expanded.rgb",
+      "sha256": "d208518bd759f99141885bc9d43c7baa2829fcf60128031e00b34e47b8bc5982"
+    },
+    {
+      "film": "kodak_vision3_250d",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_vision3_250d__kodak_2383__print__original.rgb",
+      "sha256": "ff72b6db931a1efd86afbdf4072cb3b7131407870353dde83b218e3d0fe83fc5"
+    },
+    {
+      "film": "kodak_vision3_250d",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_vision3_250d__kodak_2383__print__expanded.rgb",
+      "sha256": "786bc79cceff6a7620a77e5eb4b46d8a9c96c8544b3e64da7300f3e0d8bef101"
+    },
+    {
+      "film": "kodak_vision3_500t",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_vision3_500t__kodak_2383__print__original.rgb",
+      "sha256": "2c591185592500e3c23a55dd153786f8c9203a4e894c72e414744b7ffb624527"
+    },
+    {
+      "film": "kodak_vision3_500t",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_vision3_500t__kodak_2383__print__expanded.rgb",
+      "sha256": "41336e03c1615262f3da1889c905b509b5c1c9e1f92fa03df0e8cba9e4c2eb85"
+    },
+    {
+      "film": "kodak_vision3_50d",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "original",
+      "file": "kodak_vision3_50d__kodak_2383__print__original.rgb",
+      "sha256": "7ec6e3a875fef6a9af3f0dcff21eaab0abac551163aff9f5bec31f9884bed9b8"
+    },
+    {
+      "film": "kodak_vision3_50d",
+      "paper": "kodak_2383",
+      "scan": false,
+      "white": "expanded",
+      "file": "kodak_vision3_50d__kodak_2383__print__expanded.rgb",
+      "sha256": "ca28ad697fed4ef4f425558a3392b2d24fdd27a40306198b3883abbac51a1bd5"
+    }
+  ],
+  "engineAssetSha256": "793208861abbf022e02f2fb09e7b3a5a36a41a1e7f379b0dadd46f4d7a26a46d",
+  "license": "CC-BY-SA-4.0",
+  "sources": [
+    "https://github.com/andreavolpato/spektrafilm",
+    "https://github.com/JamesQiu2005/SpektraLab",
+    "https://github.com/Knonoa/Spektramat"
+  ],
+  "generator": "tools/host/bake_photo_previews.ps1"
+}

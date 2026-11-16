@@ -11,15 +11,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import com.spektra.latent.LatentApp
-import com.spektra.latent.data.Decoder
 import com.spektra.latent.data.Frame
 import com.spektra.latent.data.Library
+import com.spektra.latent.data.PhotoProxyStore
+import com.spektra.latent.data.PhotoLutCache
 import com.spektra.latent.engine.DevelopCancelled
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.engine.LinearImage
-import com.spektra.latent.gl.FilmPreview
 import com.spektra.latent.gl.Placement
-import com.spektra.latent.gl.PreviewFrame
+import com.spektra.latent.gl.PhotoPreviewRenderer
 import com.spektra.latent.model.Look
 import com.spektra.latent.model.Shooting
 import kotlinx.coroutines.CoroutineScope
@@ -29,6 +29,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -40,8 +41,8 @@ import kotlinx.coroutines.launch
  * The look changes on every step of a ruler ([change]); a step becomes an undo
  * entry and is saved only when the ruler comes to rest ([commit]).
  *
- * Every processed view is a [proof], a small print made after each change.
- * The GPU surface only displays the untouched source for comparison.
+ * Interactive views use the shared float proxy and GPU colour cube. A settled,
+ * low-priority full-engine proof adds spatial effects without blocking edits.
  */
 class DarkroomState(
     context: Context,
@@ -53,7 +54,14 @@ class DarkroomState(
     private val app = context.applicationContext as LatentApp
     private val appearance = context.getSharedPreferences("appearance", Context.MODE_PRIVATE)
     private val main = Handler(Looper.getMainLooper())
-    val preview = FilmPreview()
+    private val renderer = PhotoPreviewRenderer(app)
+    private val proxies = PhotoProxyStore.get(app)
+    private var sourceIdentity = ""
+    private var exactJob: Job? = null
+    private var busy = false
+    private var picking = false
+    var exact by mutableStateOf(false)
+        private set
 
     override var look by mutableStateOf(frame.look)
         private set
@@ -65,7 +73,7 @@ class DarkroomState(
     var canRedo by mutableStateOf(false)
         private set
 
-    /** A full-engine proof has been published. Until then the thumbnail stands in. */
+    /** A proxy result has been published. Until then the thumbnail stands in. */
     var ready by mutableStateOf(false)
         private set
     /** The adjustment tab shows source corrections independently of the film simulation. */
@@ -125,23 +133,24 @@ class DarkroomState(
             else proof?.let { intArrayOf(it.width, it.height) } ?: look.frameSize(frame.width, frame.height)
 
     init {
-        preview.onError = { reason -> main.post { failure = reason } }
         proofJob = scope.launch(Dispatchers.Default) { proofs() }
         load(look)
     }
 
-    /** Reads the original, cut to [aspect], for the GPU and for proofs. */
+    /** Acquires the undecorated float source proxy for both GPU and exact proofs. */
     private fun load(l: Look) {
         loading?.cancel()
         val generation = ++loadGeneration
         val key = SourceKey(l.aspect, l.lensShading)
         loading = scope.launch(Dispatchers.IO) {
             try {
-                Decoder.decode(frame.file, PREVIEW_EDGE, key.lensShading, key.aspect).use { image ->
+                proxies.acquire(frame, key.aspect, key.lensShading, PREVIEW_EDGE).use { image ->
                     if (disposed || generation != loadGeneration) return@use
-                    preview.setImage(image)
-                    val display = FilmEngine.display(image).asImageBitmap()
-                    main.post { if(!disposed && generation==loadGeneration) original=display }
+                    val display = FilmEngine.display(image)
+                    main.post {
+                        if (!disposed && generation == loadGeneration) original = display.asImageBitmap()
+                        else display.recycle()
+                    }
                     val small = image.scaled(PROOF_EDGE)
                     synchronized(sourceLock) {
                         if (disposed || generation != loadGeneration) {
@@ -149,15 +158,18 @@ class DarkroomState(
                         } else {
                             proofSource?.close()
                             proofSource = small
+                            sourceIdentity = "${frame.file.path}:${frame.file.length()}:${frame.file.lastModified()}:$key:$generation"
                             loadedSource = key
                         }
                     }
                 }
                 main.post { if (!disposed && generation == loadGeneration) show() }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                main.post { failure = e.message ?: "这张照片读不出来" }
+                main.post { if (!disposed && generation == loadGeneration) failure = e.message ?: "这张照片读不出来" }
             } catch (e: OutOfMemoryError) {
-                main.post { failure = "内存不足，读不了这张照片" }
+                main.post { if (!disposed && generation == loadGeneration) failure = "内存不足，读不了这张照片" }
             }
         }
     }
@@ -296,8 +308,16 @@ class DarkroomState(
     }
 
     private fun show() {
-        preview.show(PreviewFrame(placement = placement))
         wantProof()
+    }
+
+    /** Candidate browsing and export take priority over automatic exact proofs. */
+    fun previewActivity(pickingStocks: Boolean, exporting: Boolean) {
+        if (picking == pickingStocks && busy == exporting) return
+        picking = pickingStocks; busy = exporting
+        exactJob?.cancel()
+        FilmEngine.cancelProof()
+        if (!picking && !busy && look == settled && !adjustmentsOnly) scheduleExact(Want(look, true, false))
     }
 
     // ---- the proof
@@ -313,6 +333,8 @@ class DarkroomState(
         val want = Want(l, l == settled, adjustmentsOnly)
         if (wants.value == want) return
         proofing = true
+        exact = false
+        exactJob?.cancel()
         // Stop the previous render before publishing its replacement. Publishing
         // first could let the worker start the new render and cancel that one.
         FilmEngine.cancelProof()
@@ -327,6 +349,7 @@ class DarkroomState(
         while (!disposed && wants.value == want) {
             currentCoroutineContext().ensureActive()
             try {
+                delay(16) // coalesce events faster than the display refresh
                 makeProof(want, key)
                 break
             } catch (e: DevelopCancelled) {
@@ -342,33 +365,32 @@ class DarkroomState(
     private suspend fun makeProof(want: Want, key: SourceKey) {
         try {
             val l = want.look
-            val source = synchronized(sourceLock) {
-                if (loadedSource == key) proofSource?.scaled(if (want.sharp) PROOF_EDGE else DRAFT_EDGE) else null
-            } ?: return
-            val gate = if (want.adjustmentsOnly) WHOLE_GATE.copyOf() else rebate(l).pictureGate(source.width,source.height)
-            val sourceQuad = if (want.adjustmentsOnly) PhotoComparison.identity() else rebate(l).pictureSource(source.width,source.height)
-            val dateBounds = if (want.adjustmentsOnly) floatArrayOf() else rebate(l).dateBounds(source.width,source.height,l.formatUm/1000f)
-            val bitmap = source.use { copy ->
-                if (want.adjustmentsOnly) FilmEngine.adjustPhoto(copy, l.grade(0f), l.finish(), l.finishTable())
-                else FilmEngine.develop(
-                    copy, l.photoGrade(),
-                    l.photoOrder(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number),
-                    l.finish(), l.finishTable(), lane = FilmEngine.PROOF,
-                )
+            val order = l.photoOrder(seed = 0L)
+            val cube = if (want.adjustmentsOnly) null else
+                PhotoLutCache.ready(order, PhotoLutCache.WORK_SIZE)
+                    ?: PhotoLutCache.get(app, order, PhotoLutCache.SAMPLE_SIZE)
+            currentCoroutineContext().ensureActive()
+            val bitmap = synchronized(sourceLock) {
+                val source = proofSource?.takeIf { loadedSource == key } ?: return
+                // One persistent RGB32F upload; slider events allocate only the small display result.
+                renderer.render(source, sourceIdentity, l, cube,
+                    want.adjustmentsOnly, if (want.sharp) PROOF_EDGE else DRAFT_EDGE)
             }
             val image = bitmap.asImageBitmap()
             main.post {
                 if (!disposed && wants.value == want && loadedSource == key) {
                     proof = image
-                    proofGate = gate
-                    proofSourceQuad = sourceQuad
-                    proofDateBounds = dateBounds
+                    proofGate = WHOLE_GATE.copyOf()
+                    proofSourceQuad = PhotoComparison.identity()
+                    proofDateBounds = floatArrayOf()
                     ready = true
                     failure = null
                     placement = clamp(placement)
                     proofing = false
+                    exact = false
                 } else bitmap.recycle()
             }
+            if (want.sharp && !want.adjustmentsOnly) scheduleExact(want)
         } catch (e: DevelopCancelled) {
             throw e
         } catch (e: CancellationException) {
@@ -381,7 +403,49 @@ class DarkroomState(
                 } }
             }
         } catch (e: OutOfMemoryError) {
-            main.post { proofing = false }
+            main.post { if (!disposed && wants.value == want) proofing = false }
+        }
+    }
+
+    fun requestExact() {
+        if (!busy && !adjustmentsOnly) scheduleExact(Want(look, look == settled, false), force = true)
+    }
+
+    private fun scheduleExact(want: Want, force: Boolean = false) {
+        if (disposed || wants.value != want) return
+        exactJob?.cancel()
+        if ((!force && picking) || busy || disposed) return
+        exactJob = scope.launch(Dispatchers.Default) {
+            try {
+                delay(650)
+                if (disposed || wants.value != want || (!force && picking) || busy) return@launch
+                val l = want.look
+                val key = SourceKey(l.aspect, l.lensShading)
+                // Refine the cube once per conversion. Ordinary scene adjustments reuse it.
+                PhotoLutCache.get(app, l.photoOrder(0L), PhotoLutCache.WORK_SIZE, interactive = false)
+                currentCoroutineContext().ensureActive()
+                val source = synchronized(sourceLock) {
+                    if (loadedSource == key) proofSource?.scaled(EXACT_EDGE) else null
+                } ?: return@launch
+                val gate = rebate(l).pictureGate(source.width, source.height)
+                val quad = rebate(l).pictureSource(source.width, source.height)
+                val dates = rebate(l).dateBounds(source.width, source.height, l.formatUm / 1000f)
+                val bitmap = source.use { copy ->
+                    FilmEngine.develop(copy, l.photoGrade(),
+                        l.photoOrder(frame.id * 7919L + 1L, shooting, Library.frameSeed(frame), frame.number),
+                        l.finish(), l.finishTable(), lane = FilmEngine.PROOF)
+                }
+                if (!currentCoroutineContext().isActive) { bitmap.recycle(); return@launch }
+                main.post {
+                    if (!disposed && wants.value == want && loadedSource == key && (force || !picking) && !busy) {
+                        proof = bitmap.asImageBitmap(); proofGate = gate; proofSourceQuad = quad
+                        proofDateBounds = dates; exact = true; placement = clamp(placement)
+                    } else bitmap.recycle()
+                }
+            } catch (_: DevelopCancelled) {
+            } catch (e: CancellationException) { throw e
+            } catch (e: Exception) { Journal.w(TAG, "exact proof deferred; GPU proxy remains available", e)
+            } catch (_: OutOfMemoryError) { /* keep the inexpensive proxy */ }
         }
     }
 
@@ -391,11 +455,12 @@ class DarkroomState(
         disposed = true
         saving?.cancel()
         loading?.cancel()
+        exactJob?.cancel()
         proofJob?.cancel()
         FilmEngine.cancelProof()
         val toSave = settled
         if (toSave != frame.look) app.scope.launch { library.saveLook(frame.id, toSave) }
-        preview.release()
+        renderer.release()
         // the proof loop may still hold it for a moment: it is closed once that loop has ended
         app.scope.launch(Dispatchers.Default) {
             proofJob?.join()
@@ -411,10 +476,11 @@ class DarkroomState(
         private const val TAG = "latent-darkroom"
         private val WHOLE_GATE = floatArrayOf(0f, 0f, 1f, 0f, 1f, 1f, 0f, 1f)
         /** Long edge of the picture the preview works on. */
-        const val PREVIEW_EDGE = 2048
+        const val PREVIEW_EDGE = 1280
         /** Long edge of the picture a settled proof is made from, and of one made while a ruler is moving. */
-        const val PROOF_EDGE = 1100
-        const val DRAFT_EDGE = 560
+        const val PROOF_EDGE = 1280
+        const val DRAFT_EDGE = 720
+        const val EXACT_EDGE = 960
         const val MAX_ZOOM = 8f
     }
 }

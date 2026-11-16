@@ -1,14 +1,12 @@
 package com.spektra.latent.ui.table
 
-import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.os.Build
-import android.os.Environment
-import android.provider.MediaStore
 import androidx.activity.compose.BackHandler
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.Canvas
@@ -37,7 +35,6 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import com.spektra.latent.APP_NAME
 import com.spektra.latent.Journal
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -78,11 +75,16 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.spektra.latent.LatentApp
 import com.spektra.latent.data.Frame
+import com.spektra.latent.data.Decoder
+import com.spektra.latent.engine.FilmEngine
+import com.spektra.latent.model.Shooting
 import com.spektra.latent.data.Library
 import com.spektra.latent.data.LightTableStore
 import com.spektra.latent.data.Loupe
 import com.spektra.latent.data.Placement
 import com.spektra.latent.data.TableDoc
+import com.spektra.latent.data.PrintStorage
+import com.spektra.latent.data.SavedPrint
 import com.spektra.latent.model.Choice
 import com.spektra.latent.ui.*
 import com.spektra.latent.ui.darkroom.TRAY_PAD
@@ -109,6 +111,10 @@ import com.spektra.latent.ui.Type
 import com.spektra.latent.ui.pressable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -177,7 +183,6 @@ fun TableScreen(library: Library, store: LightTableStore, onOpen: (Long) -> Unit
     var size by remember { mutableStateOf(IntSize.Zero) }
     var picking by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf(setOf<Long>()) }
-    var exportOpen by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf<Job?>(null) }
@@ -302,6 +307,33 @@ fun TableScreen(library: Library, store: LightTableStore, onOpen: (Long) -> Unit
     }
 
     val glass = remember { lensShader() }
+    fun save() {
+        if (exporting || doc.placements.isEmpty()) return
+        exporting = true
+        val document = doc
+        val lighting = lamp
+        val aspect = exportRatio(ratio)
+        app.scope.launch {
+            try {
+                val saved = export(context, document, frames, shape, lighting, glass != null, aspect)
+                if (!saved.saved.inGallery) {
+                    runCatching {
+                        context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("image/jpeg")
+                            .putExtra(Intent.EXTRA_STREAM, saved.saved.uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), "分享观片台"))
+                    }.onFailure { Journal.w("latent-table", "composition saved; share panel unavailable", it) }
+                }
+                notice = "已保存到${if (saved.saved.inGallery) "相册" else "应用目录，可在分享面板导出"}：${saved.width} × ${saved.height}"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: OutOfMemoryError) {
+                notice = "内存不足，无法导出全部照片；请释放内存或降低导出尺寸后重试。"
+            } catch (e: Exception) {
+                notice = "没有导出：${e.message ?: "出了点问题"}"
+            } finally {
+                exporting = false
+            }
+        }
+    }
     val shown = doc.with(delta)
     val scene = Scene(
         shown, view, lamp, { images[it] }, shape, marks = true,
@@ -517,7 +549,7 @@ fun TableScreen(library: Library, store: LightTableStore, onOpen: (Long) -> Unit
                 history.let { IconButton(Glyph.Undo, "撤销", { step(undone, redone) }, enabled = undone.isNotEmpty()) }
                 history.let { IconButton(Glyph.Redo, "重做", { step(redone, undone) }, enabled = redone.isNotEmpty()) }
                 BarSep()
-                IconButton(Glyph.Share, if (exporting) "正在导出" else "导出", { exportOpen = true }, enabled = !exporting && doc.placements.isNotEmpty())
+                IconButton(Glyph.Share, if (exporting) "正在导出" else "导出", { save() }, enabled = !exporting && doc.placements.isNotEmpty())
             },
         )
         hud?.let {
@@ -668,36 +700,6 @@ fun TableScreen(library: Library, store: LightTableStore, onOpen: (Long) -> Unit
         }
     }
 
-    // ---- saving a picture of the table
-    Sheet(exportOpen, { exportOpen = false }, title = "导出") {
-        Txt("存下来的和看到的一样，带着灯光和色温；不带网格点和选择框。保存到相册的 ${APP_NAME} 相簿。", Type.micro.copy(lineHeight = 17.6.sp), color = Ink.GlassDim, maxLines = 3)
-        Gap(height = 14.dp)
-        fun save(all: Boolean) {
-            exportOpen = false
-            exporting = true
-            val d = doc
-            val v = view
-            val l = lamp
-            val window = size
-            val aspect = exportRatio(ratio)
-            app.scope.launch {
-                notice = try {
-                    val (w, h) = export(context, library, d, frames, shape, l, v, window, all, glass != null, aspect)
-                    "已保存到相册：$w × $h"
-                } catch (e: OutOfMemoryError) {
-                    "内存不够导出这么大的一张，换「只导出现在看到的窗口」再试。"
-                } catch (e: Exception) {
-                    "没有导出：${e.message ?: "出了点问题"}"
-                }
-                exporting = false
-            }
-        }
-        Btn("导出虚线框内的全部照片", { save(true) }, Modifier.fillMaxWidth(), BtnKind.Key)
-        Gap(height = 4.dp)
-        Txt("所有照片 · ${EXPORT_RATIOS.first { it.wire == ratio }.label}", Type.micro, Modifier.fillMaxWidth(), color = Ink.GlassDim, align = androidx.compose.ui.text.style.TextAlign.Center)
-        Gap(height = 12.dp)
-        Btn("只导出现在看到的窗口", { save(false) }, Modifier.fillMaxWidth())
-    }
 }
 
 /** New photographs in a row across the middle of the window, each a comfortable size on screen. */
@@ -769,80 +771,67 @@ private fun lensShader(): Any? {
 }
 
 /**
- * Paints the table into a picture and saves it to the gallery. [all]: every
- * photograph with a margin; otherwise what the window shows. Each photograph
- * is read again at the size it will have in the picture, never enlarged from
- * the copy on screen. Returns the picture's width and height.
+ * Saves every photograph within the dashed export bounds, independent of
+ * viewport zoom and pan. Each photograph is fully rendered from its native
+ * original before shrinking for the sheet.
  */
-private suspend fun export(
-    context: Context, library: Library, doc: TableDoc, frames: Map<Long, Frame>, shape: Shapes,
-    lamp: Lamp, view: View, window: IntSize, all: Boolean, glass: Boolean, ratio:Float?,
-): Pair<Int, Int> = withContext(Dispatchers.Default) {
-    val x0: Float
-    val y0: Float
-    val x1: Float
-    val y1: Float
-    if (all) {
-        val b=exportBounds(doc,shape,ratio)?:throw IOException("观片台是空的")
-        x0=b.left;y0=b.top;x1=b.right;y1=b.bottom
-    } else {
-        x0 = (-window.width / 2f - view.x) / view.s; x1 = (window.width / 2f - view.x) / view.s
-        y0 = (-window.height / 2f - view.y) / view.s; y1 = (window.height / 2f - view.y) / view.s
-    }
-    val requested=context.getSharedPreferences("appearance",Context.MODE_PRIVATE).getInt("exportEdge",3072).takeIf { it > 0 } ?: 3072
-    val longEdge=if(all)requested else min(requested,max(window.width,window.height)*2)
-    val k = longEdge / max(x1 - x0, y1 - y0)
-    val w = max(1, ((x1 - x0) * k).roundToInt())
-    val h = max(1, ((y1 - y0) * k).roundToInt())
-    // each photograph at the size it will occupy
-    val wanted = HashMap<Long, Int>()
-    for (p in doc.placements) {
-        val need = max(p.w, p.w * shape(p.frameId)) * k * 1.1f
-        val size = listOf(Library.PROXY_EDGE, 3072, 4096).firstOrNull { it >= need } ?: 4096
-        wanted[p.frameId] = max(wanted[p.frameId] ?: 0, size)
-    }
-    val pictures = HashMap<Long, ImageBitmap>()
-    for ((id, edge) in wanted) {
-        val frame = frames[id] ?: continue
-        val file = library.proxy(frame, edge) ?: throw IOException("「${frame.name}」读不出来，没有导出")
-        pictures[id] = (BitmapFactory.decodeFile(file.path) ?: throw IOException("「${frame.name}」读不出来，没有导出")).asImageBitmap()
-    }
-    val bitmap = ImageBitmap(w, h)
-    // the loupes are saved the way the screen shows them: as glass where the screen has glass
-    val scene = Scene(
-        doc, View(-(x0 + x1) / 2 * k, -(y0 + y1) / 2 * k, k), lamp, { pictures[it] }, shape,
-        marks = false, plainLoupes = !glass,
-    )
-    CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, ComposeCanvas(bitmap), Size(w.toFloat(), h.toFloat())) { drawTable(scene) }
-    if (glass) glassLoupes(bitmap.asAndroidBitmap(), scene.lenses(Size(w.toFloat(), h.toFloat())), lampColour(lamp))
-    save(context, bitmap.asAndroidBitmap())
-    w to h
-}
+private data class TableExport(val width: Int, val height: Int, val saved: SavedPrint)
 
-private fun save(context: Context, bitmap: Bitmap) {
-    val name = "LightTable_${System.currentTimeMillis()}.jpg"
-    if (Build.VERSION.SDK_INT >= 29) {
-        val resolver = context.contentResolver
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, name)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/${APP_NAME}")
-            put(MediaStore.Images.Media.IS_PENDING, 1)
+private suspend fun export(
+    context: Context, doc: TableDoc, frames: Map<Long, Frame>, shape: Shapes,
+    lamp: Lamp, glass: Boolean, ratio:Float?,
+): TableExport = withContext(Dispatchers.Default) {
+    PrintStorage.renderGate.withLock {
+        val exportContext = currentCoroutineContext()
+        val bounds = exportBounds(doc, shape, ratio) ?: throw IOException("观片台是空的")
+        val x0 = bounds.left
+        val y0 = bounds.top
+        val x1 = bounds.right
+        val y1 = bounds.bottom
+        val longEdge = context.getSharedPreferences("appearance", Context.MODE_PRIVATE)
+            .getInt("exportEdge", 3072).takeIf { it > 0 } ?: 3072
+        val k = longEdge / max(x1 - x0, y1 - y0)
+        val w = max(1, ((x1 - x0) * k).roundToInt())
+        val h = max(1, ((y1 - y0) * k).roundToInt())
+        // each photograph at the size it will occupy
+        val wanted = HashMap<Long, Int>()
+        for (p in doc.placements) {
+            val need = max(p.w, p.w * shape(p.frameId)) * k * 1.1f
+            val size = listOf(Library.PROXY_EDGE, 3072, 4096).firstOrNull { it >= need } ?: 4096
+            wanted[p.frameId] = max(wanted[p.frameId] ?: 0, size)
         }
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: throw IOException("相册没有接受这张图")
+        val pictures = HashMap<Long, ImageBitmap>()
+        var composite: Bitmap? = null
         try {
-            (resolver.openOutputStream(uri) ?: throw IOException("写不进相册")).use {
-                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it)) throw IOException("图片编码失败")
+            for ((id, edge) in wanted) {
+                exportContext.ensureActive()
+                val frame = frames[id] ?: throw IOException("版面中的照片已从片库移除")
+                val look = frame.look
+                // Composition is also an export: render the native original before resizing for its place on the sheet.
+                val bitmap = Decoder.decode(frame.file, 0, look.lensShading, look.aspect).use { original ->
+                    FilmEngine.developFloat(original, look.photoGrade(),
+                        look.photoOrder(frame.id * 7919L + 1L, Shooting.of(frame), Library.frameSeed(frame), frame.number),
+                        look.finish(), look.finishTable()).use { print -> print.display(edge) }
+                }
+                pictures[id] = bitmap.asImageBitmap()
             }
-            resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
-        } catch (e: Exception) {
-            resolver.delete(uri, null, null)
-            throw e
-        }
-    } else {
-        val dir = java.io.File(context.filesDir, "prints").apply { mkdirs() }
-        java.io.File(dir, name).outputStream().use {
-            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it)) throw IOException("图片编码失败")
+            val bitmap = ImageBitmap(w, h)
+            composite = bitmap.asAndroidBitmap()
+            // the loupes are saved the way the screen shows them: as glass where the screen has glass
+            val scene = Scene(
+                doc, View(-(x0 + x1) / 2 * k, -(y0 + y1) / 2 * k, k), lamp, { pictures[it] }, shape,
+                marks = false, plainLoupes = !glass,
+            )
+            CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, ComposeCanvas(bitmap), Size(w.toFloat(), h.toFloat())) { drawTable(scene) }
+            if (glass) glassLoupes(bitmap.asAndroidBitmap(), scene.lenses(Size(w.toFloat(), h.toFloat())), lampColour(lamp))
+            val saved = PrintStorage.save(context, "LightTable_${System.currentTimeMillis()}.jpg", "image/jpeg",
+                shouldStop = { exportContext.ensureActive(); false }) { output ->
+                if (!bitmap.asAndroidBitmap().compress(Bitmap.CompressFormat.JPEG, 92, output)) throw IOException("图片编码失败")
+            }
+            TableExport(w, h, saved)
+        } finally {
+            pictures.values.forEach { it.asAndroidBitmap().recycle() }
+            composite?.recycle()
         }
     }
 }

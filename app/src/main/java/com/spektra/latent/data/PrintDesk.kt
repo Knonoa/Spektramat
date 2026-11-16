@@ -24,7 +24,9 @@ import kotlin.math.min
 
 /** One print on order: which frame, with which look, and how far along it is. */
 class PrintJob internal constructor(val id: Long, val frame: Frame, val look: Look, val longEdge: Int,
-                                    val format: PrintFormat = PrintFormat.AUTO) {
+                                    val format: PrintFormat = PrintFormat.JPEG) {
+    internal val animation = PrintAnimation()
+
     sealed interface State {
         data object Waiting : State
         data object Working : State
@@ -67,6 +69,10 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
     /** Every order that has not been dismissed, oldest first. Read and changed on the main thread. */
     val jobs = mutableStateListOf<PrintJob>()
 
+    /** Reattaches a workbench to its outstanding order after navigating back. */
+    internal fun workbenchJob(frameId: Long): PrintJob? =
+        jobs.firstOrNull { it.frame.id == frameId && !it.stopped && !it.animation.acknowledged }
+
     init {
         scope.launch {
             library.rolls.collect { rolls ->
@@ -78,7 +84,7 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
         }
     }
 
-    fun order(frame: Frame, look: Look, longEdge: Int, format: PrintFormat = PrintFormat.AUTO): PrintJob {
+    fun order(frame: Frame, look: Look, longEdge: Int, format: PrintFormat = PrintFormat.JPEG): PrintJob {
         val job = PrintJob(nextId++, frame, look, longEdge, format)
         if (library.frame(frame.id) == null) {
             job.stopped = true
@@ -90,7 +96,7 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
         return job
     }
 
-    /** Stops a print that is waiting or under way. Nothing is saved. */
+    /** Stops unfinished work. A file already published at the same moment is retained. */
     fun stop(job: PrintJob) {
         job.stopped = true
         if (job.state is PrintJob.State.Working) Printer.cancel()
@@ -118,6 +124,10 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
                     job.before = before
                     job.after = after
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: OutOfMemoryError) {
+                Journal.w(TAG, "no memory for print indicator; original export continues", e)
             } catch (e: Exception) {
                 Journal.w(TAG, "no big pixels for ${job.frame.name}", e)
             }
@@ -127,7 +137,10 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
                 app, library, job.frame, job.look, job.longEdge, job.format,
                 shouldStop = { job.stopped || library.frame(job.frame.id) == null },
             ) { job.stage = it }
-            if (job.stopped || library.frame(job.frame.id) == null) printed.shown.recycle() else job.state = PrintJob.State.Done(printed)
+            // Printer returns only after its storage commit. A stop pressed during
+            // publication must not turn that real saved file into a cancellation.
+            if (job !in jobs && library.frame(job.frame.id) != null) jobs += job
+            job.state = PrintJob.State.Done(printed)
         } catch (e: DevelopCancelled) {
             // stopped by the person: already off the desk
         } catch (e: CancellationException) {
@@ -144,13 +157,12 @@ class PrintDesk(context: Context, private val scope: CoroutineScope, private val
             val original = FilmEngine.display(small)
             val order = look.photoOrder(seed = frame.id * 7919L + 1L, shooting = Shooting.of(frame),
                 frameSeed = Library.frameSeed(frame), number = frame.number)
-            val film = FilmEngine.develop(small, look.photoGrade(), order,
-                look.finish(), look.finishTable(), lane = FilmEngine.THUMB)
             try {
-                mosaic(original) to mosaic(film)
+                val film = FilmEngine.develop(small, look.photoGrade(), order,
+                    look.finish(), look.finishTable(), lane = FilmEngine.THUMB)
+                try { mosaic(original) to mosaic(film) } finally { film.recycle() }
             } finally {
                 original.recycle()
-                film.recycle()
             }
         }
     }

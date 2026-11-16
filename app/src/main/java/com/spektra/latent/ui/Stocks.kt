@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,13 +44,16 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
-import com.spektra.latent.data.Decoder
 import com.spektra.latent.data.Frame
-import com.spektra.latent.data.Library
+import com.spektra.latent.data.PhotoProxyStore
+import com.spektra.latent.data.PhotoLutCache
+import com.spektra.latent.gl.PhotoPreviewRenderer
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.model.Look
-import com.spektra.latent.model.Shooting
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -66,8 +70,8 @@ private val KINDS = listOf(Opt("", "全部"), Opt("彩色负片", "彩色负"), 
 
 /**
  * Film stocks or papers to choose from. With a [frame] and its [look] every
- * one is shown as that photograph wearing it -- a small print made by the
- * engine; without, by name. Films can be narrowed to one kind.
+ * one is shown as that photograph wearing it, using a cached colour cube
+ * on the shared source proxy; without, by name. Films can be narrowed to one kind.
  *
  * @param bleed the side padding of what holds this: the row scrolls out to the edges through it
  */
@@ -85,6 +89,9 @@ fun StockRail(
     var kind by remember { mutableStateOf("") }
     val visible = if (films && kind.isNotEmpty()) items.filter { it.kind == kind } else items
     val pictured = frame != null && look != null
+    val context = LocalContext.current
+    val renderer = remember(context) { PhotoPreviewRenderer(context) }
+    DisposableEffect(renderer) { onDispose { renderer.release() } }
     Column(modifier) {
         if (films) {
             val fontScale = LocalDensity.current.fontScale
@@ -123,7 +130,7 @@ fun StockRail(
                         .padding(bottom = 7.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    if (pictured) StockSample(s, films, frame!!, look!!, Modifier.size(92.dp))
+                    if (pictured) StockSample(s, films, frame!!, look!!, renderer, Modifier.size(92.dp))
                     Txt(
                         shortName(s.name), Type.film.copy(fontSize = 11.sp, letterSpacing = .04.em, lineHeight = 14.3.sp),
                         Modifier.heightIn(min = 28.6.dp), color = if (on) Ink.GlassText else Ink.GlassDim, maxLines = 2,
@@ -137,9 +144,9 @@ fun StockRail(
 
 private val sampleQueue = Semaphore(1)
 
-/** Each visible swatch is a small full-engine print of this photograph with that stock. */
+/** Visible swatches share the floating source proxy and cached pointwise photo cubes. */
 @Composable
-private fun StockSample(stock: Stock, film: Boolean, frame: Frame, look: Look, modifier: Modifier) {
+private fun StockSample(stock: Stock, film: Boolean, frame: Frame, look: Look, renderer: PhotoPreviewRenderer, modifier: Modifier) {
     val context = LocalContext.current
     val candidate =
         if (film) look.withFilm(stock.id).copy(edge = look.edge.copy(on = false), date = look.date.copy(on = false))
@@ -147,35 +154,39 @@ private fun StockSample(stock: Stock, film: Boolean, frame: Frame, look: Look, m
             paper = if (stock.id == SCAN) look.paper else stock.id, scan = stock.id == SCAN,
             edge = look.edge.copy(on = false), date = look.date.copy(on = false),
         )
-    val key = "${frame.id}-${frame.revision}-${candidate.hashCode()}-${FilmEngine.renderCacheKey}"
+    val key = "lut-v1-${frame.id}-${frame.file.length()}-${frame.file.lastModified()}-${candidate.hashCode()}-${FilmEngine.renderCacheKey}"
     var image by remember(key) { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(key) {
-        image = withContext(Dispatchers.IO) {
+        var pending: android.graphics.Bitmap? = null
+        try {
+        val result = withContext(Dispatchers.IO) {
             sampleQueue.withPermit {
                 val dir = File(context.cacheDir, "stock-samples").apply { mkdirs() }
                 dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(200)?.forEach { it.delete() }
                 val file = File(dir, "$key.jpg")
-                val cached = if (file.isFile) BitmapFactory.decodeFile(file.path) else null
+                val cached = (if (file.isFile) BitmapFactory.decodeFile(file.path) else null).also { pending = it }
                 if (cached != null) cached.asImageBitmap()
-                else runCatching {
-                    Decoder.decode(frame.file, 180, candidate.lensShading, candidate.aspect).use { source ->
-                        val bitmap = FilmEngine.develop(
-                            source, candidate.photoGrade(),
-                            candidate.photoOrder(frame.id * 7919L + 1L, Shooting.of(frame), Library.frameSeed(frame), frame.number),
-                            candidate.finish(), candidate.finishTable(), lane = FilmEngine.THUMB,
-                        )
+                else try {
+                    val cube = PhotoLutCache.get(context, candidate.photoOrder(0L), PhotoLutCache.SAMPLE_SIZE, interactive = false)
+                    PhotoProxyStore.get(context).acquire(frame, candidate.aspect, candidate.lensShading, 128).use { source ->
+                        currentCoroutineContext().ensureActive()
+                        val sourceKey = "${frame.file.path}:${frame.file.length()}:${frame.file.lastModified()}:${candidate.aspect}:${candidate.lensShading}:128"
+                        val bitmap = renderer.render(source, sourceKey, candidate, cube, false, 128)
+                        pending = bitmap
+                        currentCoroutineContext().ensureActive()
                         try {
-                            val bytes = android.graphics.Bitmap.createBitmap(bitmap.width, bitmap.height, android.graphics.Bitmap.Config.ARGB_8888)
-                            android.graphics.Canvas(bytes).drawBitmap(bitmap, 0f, 0f, null)
-                            file.outputStream().use { bytes.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, it) }
-                            bytes.asImageBitmap()
-                        } finally {
-                            bitmap.recycle()
-                        }
+                            file.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, it) }
+                        } catch (_: java.io.IOException) { /* a display cache is disposable */ }
+                        bitmap.asImageBitmap()
                     }
-                }.getOrNull()
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { null }
             }
         }
+        currentCoroutineContext().ensureActive()
+        image = result
+        pending = null
+        } finally { pending?.recycle() }
     }
     image?.let { Image(it, null, modifier, contentScale = ContentScale.Crop) } ?: Box(modifier.background(Ink.Well))
 }

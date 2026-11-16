@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.spektra.latent.Journal
+import com.spektra.latent.LatentApp
 import androidx.exifinterface.media.ExifInterface
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.engine.LinearImage
@@ -15,6 +16,14 @@ import com.spektra.latent.engine.Rebate
 import com.spektra.latent.model.Look
 import com.spektra.latent.model.Shooting
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -92,6 +101,8 @@ class Library(context: Context) {
     // File writes and catalogue changes form one operation. In particular, a
     // project cannot disappear between choosing its id and filing an original.
     private val catalogue = Mutex()
+    private val thumbnailJobs = HashMap<Long, Job>()
+    private val thumbnailScope = (app as? LatentApp)?.scope ?: CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _rolls = MutableStateFlow<List<Roll>>(emptyList())
     val rolls: StateFlow<List<Roll>> = _rolls
@@ -115,18 +126,27 @@ class Library(context: Context) {
 
     /** Rebuild old-algorithm previews after the catalogue is available. */
     suspend fun refreshPreviews() = withContext(Dispatchers.IO) {
-        catalogue.withLock {
-            // Old previews cannot stand in for results after a pipeline/data
-            // update, including changes to the saved-photo exposure policy.
-            for (frame in _rolls.value.flatMap { it.frames }) {
-                if (frame.thumb.exists()) continue
-                try {
-                    Decoder.decode(frame.file, THUMB_EDGE, frame.look.lensShading, frame.look.aspect).use {
-                        renderThumb(it, frame.look, frame.thumb, rebateOf(frame, frame.look))
-                    }
-                } catch (e: Exception) {
-                    Journal.w(TAG, "thumbnail migration failed for ${frame.name}", e)
+        val frames = catalogue.withLock { _rolls.value.flatMap { it.frames } }
+        for (frame in frames) {
+            currentCoroutineContext().ensureActive()
+            if (frame.thumb.exists()) continue
+            val pending = File(thumbs, frame.thumb.name + ".${UUID.randomUUID()}.pending")
+            try {
+                Decoder.decode(frame.file, THUMB_EDGE, frame.look.lensShading, frame.look.aspect).use {
+                    currentCoroutineContext().ensureActive()
+                    renderThumb(it, frame.look, pending, rebateOf(frame, frame.look))
                 }
+                catalogue.withLock {
+                    if (this@Library.frame(frame.id)?.revision == frame.revision && !frame.thumb.exists()) {
+                        if (!pending.renameTo(frame.thumb)) throw IOException("thumbnail could not be published")
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                Journal.w(TAG, "thumbnail migration failed for ${frame.name}", e)
+            } finally {
+                pending.delete()
             }
         }
     }
@@ -270,28 +290,55 @@ class Library(context: Context) {
         }
     }
 
-    /** Saves the frame's look and redraws its thumbnail to match. */
+    /** Persist the recipe immediately; slow thumbnail work never holds the catalogue lock. */
     suspend fun saveLook(frameId: Long, look: Look) = withContext(Dispatchers.IO) {
         catalogue.withLock {
             val f = frame(frameId) ?: return@withLock
             if (f.look == look) return@withLock
             val revision = f.revision + 1
-            val thumb = thumbFile(f.file, revision)
-            try {
-                Decoder.decode(f.file, THUMB_EDGE, look.lensShading, look.aspect).use {
-                    renderThumb(it, look, thumb, rebateOf(f, look))
-                }
-            } catch (e: Exception) {
-                Journal.w(TAG, "thumbnail failed for ${f.name}", e)
-            }
-            // larger copies of the previous revision are of no use any more
-            thumbs.listFiles { file -> file.name.startsWith(f.file.nameWithoutExtension + "_${f.revision}_p") }?.forEach { it.delete() }
             db.update("frame", ContentValues().apply {
                 put("look", look.toJson().toString())
                 put("revision", revision)
             }, "id=?", arrayOf(frameId.toString()))
-            if (thumb.exists()) f.thumb.delete()
             publish()
+            thumbnailJobs.remove(frameId)?.cancel()
+            thumbnailJobs[frameId] = thumbnailScope.launch(Dispatchers.IO) {
+                val out = thumbFile(f.file, revision)
+                val pending = File(thumbs, out.name + ".${UUID.randomUUID()}.pending")
+                try {
+                    kotlinx.coroutines.delay(350)
+                    currentCoroutineContext().ensureActive()
+                    PhotoProxyStore.get(app).acquire(f, look.aspect, look.lensShading, THUMB_EDGE).use {
+                        currentCoroutineContext().ensureActive()
+                        renderThumb(it, look, pending, rebateOf(f, look))
+                    }
+                    currentCoroutineContext().ensureActive()
+                    catalogue.withLock {
+                        val current = frame(frameId)
+                        if (current?.revision == revision && current.look == look) {
+                            if (!pending.renameTo(out)) throw IOException("thumbnail could not be published")
+                            f.thumb.delete()
+                            thumbs.listFiles { file -> file.name.startsWith(f.file.nameWithoutExtension + "_${f.revision}_p") }
+                                ?.forEach { it.delete() }
+                        }
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (e: Exception) {
+                    Journal.w(TAG, "thumbnail failed for ${f.name}; recipe saved", e)
+                } catch (e: OutOfMemoryError) {
+                    Journal.w(TAG, "no memory for thumbnail of ${f.name}; recipe saved", e)
+                } finally {
+                    pending.delete()
+                    File(pending.parentFile, pending.name + ".tmp").delete()
+                    val completedJob = currentCoroutineContext()[Job]
+                    withContext(NonCancellable) {
+                        catalogue.withLock {
+                            if (thumbnailJobs[frameId] == completedJob) thumbnailJobs.remove(frameId)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -323,6 +370,7 @@ class Library(context: Context) {
             }
             if (!deleteFiles) {
                 db.update("roll", ContentValues().apply { put("archived", 1) }, "id=?", arrayOf(projectId.toString()))
+                originalsInProject.forEach { (id, _) -> thumbnailJobs.remove(id)?.cancel() }
                 publish()
                 return@withLock ProjectRemoval(projectId, originalsInProject.size, emptyList(), true, true)
             }
@@ -426,7 +474,7 @@ class Library(context: Context) {
         }
     }
 
-    /** Every photo surface, including thumbnails, uses the full spectral engine. */
+    /** Persisted library previews use the full engine; workbench interaction uses a separate LUT. */
     private fun picture(small: LinearImage, look: Look, rebate: Rebate): Bitmap {
         val base = look.photoOrder(seed = 1L)
         val order = if (rebate.idle) base else base.copy(rebate = rebate)
@@ -443,21 +491,29 @@ class Library(context: Context) {
      * disk; null when the original cannot be read.
      */
     suspend fun proxy(frame: Frame, longEdge: Int = PROXY_EDGE): File? = withContext(Dispatchers.IO) {
-        catalogue.withLock {
-            val current = this@Library.frame(frame.id) ?: return@withLock null
-            val file = File(thumbs, "${current.file.nameWithoutExtension}_${current.revision}_p${longEdge}_${FilmEngine.renderCacheKey}.jpg")
-            if (file.exists()) return@withLock file
-            try {
-                Decoder.decode(current.file, longEdge, current.look.lensShading, current.look.aspect).use {
-                    renderThumb(it, current.look, file, rebateOf(current, current.look))
-                }
-                file
-            } catch (e: Exception) {
-                Journal.w(TAG, "no proxy for ${frame.name}", e)
-                null
-            } catch (e: OutOfMemoryError) {
-                null
+        val current = catalogue.withLock { this@Library.frame(frame.id) } ?: return@withContext null
+        val file = File(thumbs, "${current.file.nameWithoutExtension}_${current.revision}_p${longEdge}_${FilmEngine.renderCacheKey}.jpg")
+        if (file.exists()) return@withContext file
+        val pending = File(thumbs, file.name + ".${UUID.randomUUID()}.pending")
+        try {
+            Decoder.decode(current.file, longEdge, current.look.lensShading, current.look.aspect).use {
+                currentCoroutineContext().ensureActive()
+                renderThumb(it, current.look, pending, rebateOf(current, current.look))
             }
+            catalogue.withLock {
+                if (this@Library.frame(frame.id)?.revision != current.revision) return@withLock null
+                if (!file.exists() && !pending.renameTo(file)) throw IOException("proxy could not be published")
+                file
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            Journal.w(TAG, "no proxy for ${frame.name}", e)
+            null
+        } catch (e: OutOfMemoryError) {
+            null
+        } finally {
+            pending.delete()
         }
     }
 
@@ -565,6 +621,7 @@ class Library(context: Context) {
     }
 
     private fun removeFrameRecord(id: Long, original: File) {
+        thumbnailJobs.remove(id)?.cancel()
         db.beginTransaction()
         try {
             db.delete("print", "frame_id=?", arrayOf(id.toString()))

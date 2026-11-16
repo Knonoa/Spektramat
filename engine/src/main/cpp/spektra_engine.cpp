@@ -818,6 +818,20 @@ struct Engine::Impl {
                 white[c] = curve((float)std::log10(std::fmax(raw[1][c] * print->factor + print->preflash[c], 0.0) + kEps));
             }
         }
+        // Keep the material references, not a photograph's extrema, so full
+        // white extension can finish calibration after gamut/lightness mapping.
+        auto scan_xyz = [&](const double density[3], double xyz[3]) {
+            for (size_t wl = 0; wl < scan->illu.size(); wl++) {
+                if (!scan->sp.valid[wl]) continue;
+                double ds = scan->sp.base[wl];
+                for (int c = 0; c < 3; c++) ds += density[c] * scan->sp.cd[wl * 3 + c];
+                const double light = scan->illu[wl] * std::pow(10.0, -ds) / scan->norm;
+                for (int c = 0; c < 3; c++) xyz[c] += light * scan->cmfs[wl * 3 + c];
+            }
+            for (int c = 0; c < 3; c++) xyz[c] = std::fmax(xyz[c], 0.0) + kEps;
+        };
+        scan_xyz(black, color_reference.black_xyz);
+        scan_xyz(white, color_reference.white_xyz);
         color_reference.calibrate(scan_y(black), scan_y(white), p);
         const auto& curves = p.scan_film ? f.density_curves : paper->density_curves;
         const auto& le = p.scan_film ? f.log_exposure : paper->log_exposure;
@@ -1207,6 +1221,25 @@ struct Engine::Impl {
         const auto* polar = p.output_gamut.algorithm == "oklch" || p.output_gamut.algorithm == "oklrab" ||
                             p.output_gamut.algorithm == "jzazbz" ?
             &output_detail::polar_setup(p.output_gamut.algorithm, cs) : nullptr;
+        double white_m = 1, white_q = 0;
+        if (p.scanner_full_white_extension && color_reference.active) {
+            auto reference_y = [&](const double material_xyz[3]) {
+                double X = material_xyz[0], Y = material_xyz[1], Z = material_xyz[2];
+                color_reference.apply(X, Y, Z);
+                const double xyz[3] = {X, Y, Z};
+                double rgb[3], mapped[3];
+                output_matrix.apply(xyz, rgb);
+                compress_output_gamut(cs, output_view, polar, rgb, p.output_gamut);
+                cs.to_xyz.apply(rgb, mapped);
+                return mapped[1];
+            };
+            const double black = reference_y(color_reference.black_xyz);
+            const double white = reference_y(color_reference.white_xyz);
+            if (!std::isfinite(black) || !std::isfinite(white) || white - black <= 1e-10)
+                throw std::string("material white cannot be extended in this output space");
+            white_m = (1.0 - black) / (white - black);
+            white_q = black * (1.0 - white_m);
+        }
         parallel_for(h, [&](int y0, int y1) {
             float lx[3];
             for (size_t i = (size_t)y0 * w; i < (size_t)y1 * w; i++) {
@@ -1246,6 +1279,16 @@ struct Engine::Impl {
                 double rgb[3];
                 output_matrix.apply(xyz, rgb);
                 compress_output_gamut(cs, output_view, polar, rgb, p.output_gamut);
+                if (p.scanner_full_white_extension && color_reference.active) {
+                    double mapped[3]; cs.to_xyz.apply(rgb, mapped);
+                    const double corrected = white_m * mapped[1] + white_q;
+                    if (std::abs(mapped[1]) > 1e-10) {
+                        const double gain = corrected / mapped[1];
+                        for (double& channel : rgb) channel *= gain;
+                    } else {
+                        for (double& channel : rgb) channel = white_m * channel + white_q;
+                    }
+                }
                 ch[0][i] = (float)rgb[0];
                 ch[1][i] = (float)rgb[1];
                 ch[2][i] = (float)rgb[2];

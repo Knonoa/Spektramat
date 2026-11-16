@@ -350,6 +350,53 @@ void main() {
     fun previewCameraFragment(context: Context): String =
         VERSION + EXTERNAL + FILM_HOST + shared(context) + PREVIEW_CAMERA_MAIN
 
+    /** Float source proxy -> scene corrections -> photo cube -> finishing -> display. */
+    fun photoProxyFragment(context: Context): String = VERSION + FILM_HOST + shared(context) + """
+uniform sampler2D u_src;
+uniform sampler3D u_preview_lut;
+uniform float u_preview_lut_n;
+uniform float u_photo_ev;
+uniform int u_photo_film;
+uniform vec3 u_photo_to_display_r;
+uniform vec3 u_photo_to_display_g;
+uniform vec3 u_photo_to_display_b;
+uniform Grade u_grade;
+uniform Finish u_finish;
+in vec2 v_uv;
+out vec4 o_color;
+vec3 photo_lut(vec3 c) {
+    float n = u_preview_lut_n - 1.0;
+    vec3 x = c * n;
+    vec3 base = clamp(floor(x), vec3(0.0), vec3(n - 1.0));
+    vec3 f = x - base;
+    ivec3 p = ivec3(base.z, base.y, base.x);
+    vec3 c00 = mix(texelFetch(u_preview_lut, p, 0).rgb, texelFetch(u_preview_lut, p + ivec3(1,0,0), 0).rgb, f.z);
+    vec3 c01 = mix(texelFetch(u_preview_lut, p + ivec3(0,1,0), 0).rgb, texelFetch(u_preview_lut, p + ivec3(1,1,0), 0).rgb, f.z);
+    vec3 c10 = mix(texelFetch(u_preview_lut, p + ivec3(0,0,1), 0).rgb, texelFetch(u_preview_lut, p + ivec3(1,0,1), 0).rgb, f.z);
+    vec3 c11 = mix(texelFetch(u_preview_lut, p + ivec3(0,1,1), 0).rgb, texelFetch(u_preview_lut, p + ivec3(1,1,1), 0).rgb, f.z);
+    return mix(mix(c00, c01, f.y), mix(c10, c11, f.y), f.x);
+}
+void main() {
+    // RGB32F textures are fetched explicitly: float filtering is optional on GLES.
+    vec2 at = v_uv * vec2(textureSize(u_src, 0)) - 0.5;
+    ivec2 lo = ivec2(floor(at));
+    ivec2 limit = textureSize(u_src, 0) - ivec2(1);
+    vec2 f = fract(at);
+    vec3 a = mix(texelFetch(u_src, clamp(lo, ivec2(0), limit), 0).rgb,
+                 texelFetch(u_src, clamp(lo + ivec2(1,0), ivec2(0), limit), 0).rgb, f.x);
+    vec3 b = mix(texelFetch(u_src, clamp(lo + ivec2(0,1), ivec2(0), limit), 0).rgb,
+                 texelFetch(u_src, clamp(lo + ivec2(1,1), ivec2(0), limit), 0).rgb, f.x);
+    vec3 linear = grade_scene(mix(a,b,f.y), u_grade) * u_photo_ev;
+    if (u_photo_film == 1) {
+        vec3 shaped = PHOTO_SHAPER;
+        linear = photo_lut(shaped);
+    }
+    linear = finish_all(linear, v_uv * 2.0 - 1.0, u_finish);
+    linear = vec3(dot(u_photo_to_display_r, linear), dot(u_photo_to_display_g, linear), dot(u_photo_to_display_b, linear));
+    o_color = vec4(lt_srgb3(linear), 1.0);
+}
+""".replace("PHOTO_SHAPER", com.spektra.latent.engine.PhotoPreviewLut.SHAPER_GLSL)
+
     /** Encoded camera values for first-frame display and the independent meter. */
     const val CAMERA_PASSTHROUGH = """#version 300 es
 #extension GL_OES_EGL_image_external_essl3 : require

@@ -78,6 +78,8 @@ data class PhotoModel(
     val inputGamutCompression: Boolean = true,
     val inputGamutAlgorithm: String = "xy",
     val inputGamutKnee: List<Float> = listOf(0f, 1f, 6f),
+    /** Product extension: calibrate material white after output gamut/lightness mapping. */
+    val scannerFullWhiteExtension: Boolean = false,
 ) {
     /** Versioned protocol shared with read_photo_model() in lt_jni.cpp. */
     internal fun floats(): FloatArray = buildList {
@@ -127,6 +129,7 @@ data class PhotoModel(
         val illuminant = enlargerIlluminants.indexOf(enlargerIlluminant)
         require(illuminant >= 0) { "Unknown enlarger illuminant: $enlargerIlluminant" }
         add(illuminant.toFloat())
+        flag(scannerFullWhiteExtension)
     }.toFloatArray().also { values -> require(values.all { it.isFinite() }) }
 
     /** Save the same versioned contract that native consumes. */
@@ -135,8 +138,8 @@ data class PhotoModel(
     })
 
     companion object {
-        const val SCHEMA = 2
-        const val FIELD_COUNT = 137
+        const val SCHEMA = 3
+        const val FIELD_COUNT = 138
         internal val gamutAlgorithms = listOf("cam16ucs", "off", "aces_rgc", "oklch", "oklrab", "jzazbz")
         internal val meteringMethods = listOf("center_weighted", "average", "median", "partial", "matrix", "multi_zone", "highlight_weighted")
         internal val spectralMethods = listOf("hanatos2025", "mallett2019")
@@ -149,7 +152,8 @@ data class PhotoModel(
             val schema = json.optInt("schema")
             if (schema !in 1..SCHEMA) return PhotoModel()
             val a = json.optJSONArray("values") ?: return PhotoModel()
-            if (a.length() != (if (schema == 1) 76 else FIELD_COUNT) || a.optDouble(0) != schema.toDouble()) return PhotoModel()
+            val expectedCount = when (schema) { 1 -> 76; 2 -> 137; else -> FIELD_COUNT }
+            if (a.length() != expectedCount || a.optDouble(0) != schema.toDouble()) return PhotoModel()
             val v = FloatArray(a.length()) { a.optDouble(it, Double.NaN).toFloat() }
             if (v.any { !it.isFinite() }) return PhotoModel()
             var i = 1
@@ -202,6 +206,7 @@ data class PhotoModel(
                     inputGamutCompression = flag(), inputGamutAlgorithm = inputGamutAlgorithms[index()],
                     inputGamutKnee = triple(),
                     enlargerIlluminant = enlargerIlluminants[index()],
+                    scannerFullWhiteExtension = if (schema >= 3) flag() else false,
                 )
             } catch (_: IllegalArgumentException) { PhotoModel() }
               catch (_: IndexOutOfBoundsException) { PhotoModel() }

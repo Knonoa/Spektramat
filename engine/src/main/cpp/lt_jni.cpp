@@ -28,6 +28,7 @@
 #include "lt_tables.hpp"
 #include "lt_video.hpp"
 #include "lt_preview.hpp"
+#include "lt_photo_preview.hpp"
 #include "parallel.hpp"
 #include "spektra_engine.hpp"
 #include "overscan.hpp"
@@ -404,6 +405,23 @@ NATIVE(jlong, newFloatImage)(JNIEnv* env, jobject, jint width, jint height) {
         throw_io(env, "out of memory");
         return 0;
     }
+}
+
+// A persistent proxy must carry the RAW fallback warning across process death.
+NATIVE(jlong, newProxyImage)(JNIEnv* env, jobject, jint width, jint height, jboolean previewOnly, jint lensOpcodes) {
+    if (width <= 0 || height <= 0 || (uint64_t)width * height > 4096ull * 4096 || lensOpcodes < 0) {
+        throw_io(env, "invalid proxy image size or provenance");
+        return 0;
+    }
+    try {
+        auto out = std::make_shared<LinearImage>();
+        out->width = width; out->height = height;
+        out->rgb.resize((size_t)width * height * 3);
+        out->preview_only = previewOnly == JNI_TRUE;
+        out->lens_opcodes = lensOpcodes;
+        out->developer = "float-proxy";
+        return publish(std::move(out));
+    } catch (const std::bad_alloc&) { throw_io(env, "out of memory"); return 0; }
 }
 
 NATIVE(jlong, scaled)(JNIEnv* env, jobject, jlong id, jint maxEdge) {
@@ -812,12 +830,12 @@ NATIVE(jfloatArray, proofDateBounds)(JNIEnv* env, jobject, jint w, jint h, jfloa
 // `lane`: 0 the print engine, 1 the proof engine, 2 the thumbnail engine. They do not wait for each other.
 // `listener.onStage(n)`: 1 exposed, 2 developed, 3 printed, 4 scanned.
 // Returns null, "cancelled", or what went wrong.
-// PhotoModel v2. Count and version are checked before any pixels are graded.
+// PhotoModel v3. Count and version are checked before any pixels are graded.
 bool read_photo_model(JNIEnv* env, jfloatArray model, spk::RenderParams& p) {
-    constexpr int count = 137;
+    constexpr int count = 138;
     if (!model || env->GetArrayLength(model) != count) return false;
     float values[count];
-    if (!read_floats(env, model, values, count) || values[0] != 2.0f) return false;
+    if (!read_floats(env, model, values, count) || values[0] != 3.0f) return false;
     for (float v : values) if (!std::isfinite(v)) return false;
     size_t i = 1;
     auto number = [&] { return values[i++]; };
@@ -883,6 +901,7 @@ bool read_photo_model(JNIEnv* env, jfloatArray model, spk::RenderParams& p) {
     if (illuminant < 0 || illuminant > 4 || illuminant != (float)(int)illuminant) return false;
     const char* illuminants[] = {"TH-KG3", "D55", "D50", "T", "K75P"};
     p.enlarger_illuminant = illuminants[(int)illuminant];
+    p.scanner_full_white_extension = flag();
     return i == count;
 }
 
@@ -948,6 +967,103 @@ NATIVE(jstring, bakePreviewLut)(JNIEnv* env, jobject, jlong id, jstring film, js
     } catch (const std::string& e) { return jstr(env, e); }
       catch (const std::exception& e) { return jstr(env, e.what()); }
     return nullptr;
+}
+
+NATIVE(jstring, bakePhotoPreviewLut)(JNIEnv* env, jobject, jlong id, jstring film, jstring paper,
+                                    jboolean scanFilm, jfloatArray jlook, jfloatArray jmodel, jstring outputColorSpace, jint size) {
+    auto cube = video_cube(id);
+    float look[15];
+    if (!cube || !read_floats(env, jlook, look, 15)) return jstr(env, "invalid photo preview request");
+    for (float v : look) if (!std::isfinite(v)) return jstr(env, "non-finite photo preview fields");
+    spk::RenderParams p;
+    if (!read_photo_model(env, jmodel, p)) return jstr(env, "invalid photo preview model");
+    p.film_stock = str(env, film); p.print_stock = str(env, paper); p.scan_film = scanFilm == JNI_TRUE;
+    p.print_exposure = look[0]; p.y_filter_shift = look[1]; p.m_filter_shift = look[2];
+    p.dir_couplers_active = look[3] > .5f; p.dir_couplers_amount = look[4];
+    std::lock_guard<std::mutex> lock(cube->mutex);
+    auto& ctx = spk::EngineContext::instance();
+    if (!ctx.ready) return jstr(env, "engine not initialised");
+    try {
+        p.output_color_space = str(env, outputColorSpace);
+        spk::output_color_space(p.output_color_space);
+        spk::Engine engine(ctx.data, ctx.cam16);
+        std::string error;
+        if (!lt::bake_photo_preview_lut(engine, p, size, cube->lut, error)) return jstr(env, error);
+    } catch (const std::string& e) { return jstr(env, e); }
+      catch (const std::exception& e) { return jstr(env, e.what()); }
+    return nullptr;
+}
+
+NATIVE(jstring, loadPhotoPreviewLut)(JNIEnv* env, jobject, jlong id, jint size, jobject pixels) {
+    auto cube = video_cube(id);
+    if (!cube || size < 17 || size > 129 || !pixels) return jstr(env, "invalid cached photo cube");
+    const size_t count = (size_t)size * size * size * 3;
+    if (env->GetDirectBufferCapacity(pixels) != (jlong)(count * sizeof(float)))
+        return jstr(env, "cached photo cube length mismatch");
+    const auto* data = static_cast<const float*>(env->GetDirectBufferAddress(pixels));
+    if (!data) return jstr(env, "cached photo cube unavailable");
+    for (size_t i = 0; i < count; ++i) if (!std::isfinite(data[i])) return jstr(env, "non-finite cached cube");
+    try {
+        std::lock_guard<std::mutex> lock(cube->mutex);
+        cube->lut.rgb.assign(data, data+count); cube->lut.size = size;
+    } catch (const std::exception& e) { return jstr(env, e.what()); }
+    return nullptr;
+}
+
+NATIVE(jstring, renderPhotoPreviewLut)(JNIEnv* env, jobject, jlong id, jlong source,
+                                     jfloatArray jgrade, jfloat ev, jfloatArray jfinish,
+                                     jfloatArray jtable, jfloatArray jdisplay, jobject output) {
+    auto cube = video_cube(id);
+    auto img = image(source);
+    float grade[lt::kGradeFloats], finish[lt::kFinishFloats];
+    float display[9];
+    std::vector<float> table(lt::kFinishTableFloats);
+    if (!cube || !img || !std::isfinite(ev) ||
+        !read_floats(env, jgrade, grade, lt::kGradeFloats) ||
+        !read_floats(env, jfinish, finish, lt::kFinishFloats) ||
+        !read_floats(env, jtable, table.data(), lt::kFinishTableFloats) ||
+        !read_floats(env, jdisplay, display, 9))
+        return jstr(env, "invalid float photo sampler parameters");
+    for (float v : grade) if (!std::isfinite(v)) return jstr(env, "invalid float photo grade");
+    for (float v : display) if (!std::isfinite(v)) return jstr(env, "invalid float photo display conversion");
+    AndroidBitmapInfo info{};
+    if (AndroidBitmap_getInfo(env, output, &info) != ANDROID_BITMAP_RESULT_SUCCESS ||
+        info.format != ANDROID_BITMAP_FORMAT_RGBA_8888 || info.width != img->width || info.height != img->height ||
+        info.stride != info.width * 4) return jstr(env, "photo preview output size mismatch");
+    void* out = nullptr;
+    if (AndroidBitmap_lockPixels(env, output, &out) != ANDROID_BITMAP_RESULT_SUCCESS)
+        return jstr(env, "photo preview output unavailable");
+    std::string error;
+    try {
+        std::lock_guard<std::mutex> lock(cube->mutex);
+        if (cube->lut.size < 2) throw std::string("photo cube is empty");
+        const size_t count = (size_t)img->width * img->height;
+        std::vector<float> rgb(img->rgb.size()), planes[3];
+        lt::grade_image(grade, img->rgb.data(), rgb.data(), img->width, img->height);
+        for (auto& plane : planes) plane.resize(count);
+        const float gain = std::exp2(ev);
+        for (size_t i = 0; i < count; ++i) {
+            float linear[3], sample[3];
+            for (int c = 0; c < 3; ++c) linear[c] = rgb[3*i+c] * gain;
+            lt::sample_photo_preview_lut(cube->lut, linear, sample);
+            for (int c = 0; c < 3; ++c) planes[c][i] = sample[c];
+        }
+        lt::finish_float_planes(finish, table.data(), planes[0].data(), planes[1].data(), planes[2].data(),
+                                img->width, img->height, rgb.data());
+        auto* rgba = static_cast<uint8_t*>(out);
+        for (size_t i = 0; i < count; ++i) {
+            for (int c = 0; c < 3; ++c) {
+                float linear = 0;
+                for (int k = 0; k < 3; ++k) linear += display[3*c+k] * rgb[3*i+k];
+                const float code = spk::output_encode(std::clamp(linear, 0.f, 1.f), "sRGB");
+                rgba[4*i+c] = (uint8_t)std::lround(code * 255.f);
+            }
+            rgba[4*i+3] = 255;
+        }
+    } catch (const std::string& e) { error = e; }
+      catch (const std::exception& e) { error = e.what(); }
+    AndroidBitmap_unlockPixels(env, output);
+    return error.empty() ? nullptr : jstr(env, error);
 }
 
 NATIVE(jfloat, meterPreview)(JNIEnv* env, jobject, jlong id, jfloatArray jgrade, jint method) {

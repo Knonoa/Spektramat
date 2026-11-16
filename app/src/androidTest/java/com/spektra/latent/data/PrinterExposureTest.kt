@@ -2,6 +2,9 @@ package com.spektra.latent.data
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.BitmapFactory
+import android.os.Build
+import android.provider.MediaStore
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.spektra.latent.LatentApp
@@ -22,7 +25,7 @@ import java.security.MessageDigest
 /** Exercise the real export route, including its output-format model handling. */
 @RunWith(AndroidJUnit4::class)
 class PrinterExposureTest {
-    @Test fun jpegAndFloatExportsKeepFixedPhotoExposureForLegacyRecipes() = runBlocking {
+    @Test fun allFormatsKeepFixedPhotoExposureAndPublishRealFiles() = runBlocking {
         val app = ApplicationProvider.getApplicationContext<LatentApp>()
         val startup = withTimeout(120_000) { app.startup.first { it is Startup.Ready } as Startup.Ready }
         val file = File(app.cacheDir, "printer-exposure-${System.nanoTime()}.png")
@@ -38,7 +41,7 @@ class PrinterExposureTest {
             // An unregistered test frame prevents touching the user's catalogue.
             val frame = Frame(-998881L, -1L, 1, file, "test export", false, 48, 32,
                 0L, "", "", 0, 0.0, 0.0, 0.0, -2f, look, file, 1)
-            for (format in listOf(PrintFormat.JPEG, PrintFormat.FLOAT_TIFF, PrintFormat.AUTO)) {
+            for (format in PrintFormat.entries) {
                 val expected = Decoder.decode(file, 0, look.lensShading, look.aspect).use { image ->
                     FilmEngine.developFloat(image, look.photoGrade(),
                         look.photoOrder(frame.id * 7919L + 1L, Shooting.of(frame), Library.frameSeed(frame), frame.number),
@@ -53,7 +56,18 @@ class PrinterExposureTest {
                             assertEquals(32, printed.height)
                             assertArrayEquals("$format must not restore automatic exposure while selecting output format",
                                 pixels(expectedDisplay), pixels(printed.shown))
-                            app.contentResolver.openInputStream(printed.uri)!!.use { assertTrue(it.read() >= 0) }
+                            val bytes = app.contentResolver.openInputStream(printed.uri)!!.use { it.readBytes() }
+                            assertFile(format, bytes, 48, 32)
+                            if (Build.VERSION.SDK_INT >= 29) {
+                                assertTrue("$format must be published to MediaStore", printed.inGallery)
+                                app.contentResolver.query(printed.uri, arrayOf(MediaStore.Images.Media.MIME_TYPE,
+                                    MediaStore.Images.Media.IS_PENDING, MediaStore.Images.Media.RELATIVE_PATH), null, null, null)!!.use {
+                                    assertTrue(it.moveToFirst())
+                                    assertEquals(format.mime, it.getString(0))
+                                    assertEquals(0, it.getInt(1))
+                                    assertEquals("Pictures/Spektramat/", it.getString(2))
+                                }
+                            }
                         } finally { expectedDisplay.recycle() }
                     } finally {
                         printed.shown.recycle()
@@ -61,7 +75,8 @@ class PrinterExposureTest {
                     }
                 } finally { expected.close() }
             }
-            val small = Printer.print(app, startup.library, frame, look, 24, PrintFormat.AUTO) { }
+            // No explicit format: the default must be an album-compatible JPEG.
+            val small = Printer.print(app, startup.library, frame, look, 24) { }
             try {
                 assertEquals(24, small.width)
                 assertEquals(16, small.height)
@@ -77,10 +92,7 @@ class PrinterExposureTest {
                         }
                     }
                 }
-                app.contentResolver.openInputStream(small.uri)!!.use {
-                    assertEquals('I'.code, it.read())
-                    assertEquals('I'.code, it.read())
-                }
+                app.contentResolver.openInputStream(small.uri)!!.use { assertFile(PrintFormat.JPEG, it.readBytes(), 24, 16) }
             } finally {
                 small.shown.recycle()
                 app.contentResolver.delete(small.uri, null, null)
@@ -95,5 +107,22 @@ class PrinterExposureTest {
 
     private fun pixels(bitmap: Bitmap) = IntArray(bitmap.width * bitmap.height).also {
         bitmap.getPixels(it, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+    }
+
+    private fun assertFile(format: PrintFormat, bytes: ByteArray, width: Int, height: Int) {
+        when (format) {
+            PrintFormat.JPEG -> {
+                assertEquals(255, bytes[0].toInt() and 255); assertEquals(216, bytes[1].toInt() and 255)
+            }
+            PrintFormat.PNG -> assertArrayEquals(byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10), bytes.copyOf(8))
+            PrintFormat.DNG -> {
+                assertEquals('I'.code.toByte(), bytes[0]); assertEquals('I'.code.toByte(), bytes[1])
+            }
+        }
+        if (format != PrintFormat.DNG) {
+            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)!!
+            try { assertEquals(width, decoded.width); assertEquals(height, decoded.height) }
+            finally { decoded.recycle() }
+        }
     }
 }

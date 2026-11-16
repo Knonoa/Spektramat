@@ -4,9 +4,9 @@
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 ![Android 8.0+](https://img.shields.io/badge/Android-8.0%2B-3DDC84.svg)
-[![Preview](https://img.shields.io/badge/Release-Preview-orange.svg)](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.2)
+[![Preview](https://img.shields.io/badge/Release-Preview-orange.svg)](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3)
 
-中文 · [English](README.en.md) · **[下载 Android 预览版](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.2)** · [观看介绍](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
+中文 · [English](README.en.md) · **[下载 Android 预览版](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3)** · [观看介绍](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
 
 [![Spektramat：把光谱胶片冲印带到 Android](docs/media/spektramat-cover.jpg)](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
 
@@ -26,7 +26,7 @@
 
 - **先看清校正。**「调节」页直接展示原片上的调整，切换到后续工序再查看胶片与印相结果。
 - **把喜欢的效果留下。** 保存配方，多选照片后批量套用、批量冲印；撤销、重做、自动保存、直方图和原图对比帮助你反复推敲。
-- **把成片带走。** 默认从全尺寸原片渲染，保存带匹配 ICC 的 32 位浮点 TIFF；也可明确选择 8 位 sRGB JPEG 分享副本。日期后背也可独立于片边启用。
+- **把成片带走。** 默认从全尺寸原片渲染为便于相册查看的 JPEG；也可选择保留输出色域、带 ICC 的 16 位无损 PNG，或保留高光与阴影范围的 32 位浮点线性 DNG 成片。日期后背也可独立于片边启用。
 
 ## 给照片留出空间
 
@@ -48,7 +48,7 @@
 
 完整照片引擎以 **81 个波长采样**模拟胶片与相纸过程：原片校正后，计算胶片曝光与显影，再经过光谱印相、扫描和整饰。反转片或直接扫描可以绕过相纸步骤；启用的颗粒、光晕等效果参与照片处理。
 
-**照片使用完整引擎，拍摄取景使用 GPU 颜色 LUT。** 工作台后续工序预览、胶片缩略图和最终冲印均运行完整照片引擎；预览以较小源图控制计算量。照片的胶片—印相—扫描转换不依赖简化的颜色 3D LUT，参考算法自身的光谱重建表仍参与计算。
+**快速调节用 GPU LUT，最终照片用完整引擎。** 工作台共享最长边 1280 的线性浮点源代理；胶片／相纸候选图缩至 128，使用完整引擎烘焙并缓存的 33³ LUT；主画面调节复用 GPU 颜色转换，停手后可升级 65³ LUT，并在空闲时生成含空间效果的完整校样。导出重新读取原片，执行完整胶片—印相—扫描算法。
 
 **已拍好的照片不再自动测光。** 工作台、缩略图和最终冲印保留原片的曝光基准，避免白棚、高调或暗调画面被自动拉向中灰。需要改变明暗时，使用「调节 → 曝光」；印相曝光补偿也会关闭，让手动 EV 直接影响成片。胶片与相纸的固定灰卡标定仍保留，胶片自身的色调和高光响应仍会改变观感。
 
@@ -58,28 +58,34 @@
 
 「调节」页是原片校正预览，不叠加胶片、相纸、颗粒、片边或日期。预览与全尺寸成片可能因采样尺度出现差异，随机纹理也不保证与 Python 逐像素相同。固定上游版本、资产哈希和已执行的确定性／随机分布验证，见 [算法验证记录](docs/算法对齐验证-2026-11-12.zh-CN.md)、[GPU 取景说明](docs/相机GPU实时预览-2026-11-12.zh-CN.md) 与 [视频 LUT 说明](docs/视频LUT实现与验证-2026-11-12.zh-CN.md)。
 
+**白位有两挡。** 原始白位保留材料本来的纸白／片白；完整扩展按材料参考白映射到输出白点，不依据画面最亮像素自动拉伸。浮点处理保留负值和超过白点的值；屏幕与 JPEG／PNG 编码有各自的显示范围。旧配方的自定义白位会保留，直到手动选择新挡位。
+
+代理缓存、LUT 近似范围及导出保存边界，见 [工作台快速预览实施记录](docs/工作台快速预览实施记录-2026-11-16.zh-CN.md)。
+
 ## 开始你的第一张冲印
 
 需要 **Android 8.0+、OpenGL ES 3.0**；当前包含 `arm64-v8a` 与 `x86_64`，不包含 32 位 ARM。
 
-1. 在 [Release 的 Assets](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.2) 下载并安装 **`Spektramat-v0.1.0-preview.2.apk`**。
+1. 在 [Release 的 Assets](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3) 下载并安装 **`Spektramat-v0.1.0-preview.3.apk`**。
 2. 进入「冲印室」，从相册、文件或其他应用导入照片。支持 JPEG、8/16 位 PNG、支持的 TIFF 与 RAW；暂不接受需要经显示缓冲降精度的 HEIF／AVIF。
-3. 依次调整 **调节 → 胶片 → 质感 → 放大机 → 片边**，点「冲印」选择尺寸和自动、JPEG 或浮点 TIFF 格式。
+3. 依次调整 **调节 → 胶片 → 质感 → 放大机 → 片边**，点「冲印」选择尺寸和 JPEG（默认）、PNG 或 DNG 格式。
 
-Android 10 及以上通过 MediaStore 保存到图库 `Pictures/Spektramat`；Android 8/9 保存到应用私有 `files/prints`，可通过分享导出。相机、麦克风和照片权限按功能申请。
+Android 10 及以上通过 MediaStore 保存到 `Pictures/Spektramat`，JPEG／PNG 可供相册查看，DNG 需要兼容查看器；Android 8/9 保存到应用私有 `files/prints`，可通过分享导出。相机、麦克风和照片权限按功能申请。
 
 <details>
 <summary>预览版身份与兼容性</summary>
 
-本次发布为 **debug 签名 APK**：应用 ID `com.spektra.latent.dev`，应用内版本 `0.1.0-preview.2-dev`，Release 标签 `v0.1.0-preview.2`。可与正式包 `com.spektra.latent` 并存；覆盖更新需要相同应用 ID 与签名。
+本次发布为 **debug 签名 APK**：应用 ID `com.spektra.latent.dev`，应用内版本 `0.1.0-preview.3-dev`，Release 标签 `v0.1.0-preview.3`。可与正式包 `com.spektra.latent` 并存；覆盖更新需要相同应用 ID 与签名。
 
-本轮 17 项照片精度、曝光、工作台和 GPU 测试在 API 31 模拟器通过；真机 V2454DA 本轮覆盖安装被系统拒绝，尚未完成此版本真机验证。当前版本的硬件 JPEG/RAW 拍摄、视频编码稳定性与 Sony USB 联机仍需进一步真机验收，不承诺固定帧率或所有设备兼容。完整处理需要计算时间和内存；部分上游高级参数、自定义色彩空间与光源尚无界面入口。成片直接写入 float32 TIFF，不经 F16 显示缓冲；没有可靠保精度解码器的格式会明确报错。
+当前开发版本已在 Android 模拟器执行照片精度、曝光、代理与 GPU 检查；最新导出格式与任务恢复的检查记录见实施文档，尚未完成此版本真机验证。当前版本的硬件 JPEG/RAW 拍摄、视频编码稳定性与 Sony USB 联机仍需进一步真机验收，不承诺固定帧率或所有设备兼容。完整处理需要计算时间和内存；部分上游高级参数、自定义色彩空间与光源尚无界面入口。处理保持 float32；DNG 直接保存线性浮点样本，不经 F16 显示缓冲；JPEG／PNG 只在最终编码时转换为各自的文件范围和位深。没有可靠保精度解码器的输入格式会明确报错。
 
 Sony 监视器在 Android 10 及以上可将额外原片复制到 `Download/Spektramat`，监看录像保存到 `Movies/Spektramat`。Android 8/9 的监看录像保存在应用专属目录，暂不支持将原片另存到公共下载目录。
 
 遇到问题请在 [Issues](https://github.com/Knonoa/Spektramat/issues) 附上设备型号、Android 版本、复现步骤与截图；图像问题可附可公开的样片和配方。
 
 </details>
+
+JPEG 使用 8 位 sRGB；PNG 使用 16 位无损编码，嵌入匹配输出色域和编码的 ICC。DNG 是完成胶片处理后的 32 位浮点线性成片，保留负值和超过白点的数据，不会还原为相机传感器 RAW；查看软件可能另加曝光或色调映射。格式选项不包含自动或 TIFF，输入 TIFF 仍受支持。
 
 ## 原片与项目，如何保存
 
@@ -115,7 +121,7 @@ macOS / Linux 使用 `./gradlew :app:assembleDebug`；输出 `app/build/outputs/
 | **Andrea Volpato / [spektrafilm](https://github.com/andreavolpato/spektrafilm)** | 胶片过程模型与测量配置。配置、派生 LUT 和相关编码资产采用 **CC BY-SA 4.0**，见 [署名说明](engine/src/main/assets/licenses/spektrafilm/NOTICE.txt)、[许可全文](engine/src/main/assets/licenses/spektrafilm/CC-BY-SA-4.0.txt) 与 [来源及变更记录](engine/src/main/assets/licenses/spektrafilm/CHANGELOG.txt)。 |
 | **[SpektraLab](https://github.com/JamesQiu2005/SpektraLab)** | 原生参考实现和产品胶片／相纸资产，保留 [GPL v3](engine/src/main/assets/licenses/SpektraLab/GPL-3.0.txt)。额外黑白配置署名 **Hanze Qiu**。 |
 | **[LibRaw](https://www.libraw.org/)、[libgphoto2](https://github.com/gphoto/libgphoto2)、stb** | RAW 解码（LGPL / CDDL）、Sony PTP 协议参考和图像处理工具。 |
-| **[Little CMS 2.17](https://github.com/mm2/Little-CMS)、[LibTIFF 4.7.0](https://libtiff.gitlab.io/libtiff/)** | 原生 ICC 浮点色彩转换，以及 TIFF 8/16 位整数和 32 位浮点样本读取。导出不会先经过 F16 或 8 位显示缓冲。 |
+| **[Little CMS 2.17](https://github.com/mm2/Little-CMS)、[LibTIFF 4.7.0](https://libtiff.gitlab.io/libtiff/)** | 原生 ICC 浮点色彩转换，以及 TIFF 8/16 位整数和 32 位浮点样本读取。DNG 浮点导出不会经过 F16 或 8 位显示缓冲；JPEG／PNG 在最终编码时转换。 |
 | **TeX Gyre Heros、DejaVu Sans Mono** | 片边字体，分别使用 GUST Font License 与 DejaVu 字体许可。 |
 
 完整声明见 [licenses](engine/src/main/assets/licenses/)、[fonts](engine/src/main/assets/fonts/)、[stb 许可](engine/src/main/cpp/third_party/STB_LICENSE) 和 [Little CMS / LibTIFF 许可](engine/src/main/assets/licenses/)。再分发时请保留版权与数据署名，并按适用许可证提供源码。
