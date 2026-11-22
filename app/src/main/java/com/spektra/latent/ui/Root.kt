@@ -31,10 +31,13 @@ import com.spektra.latent.Startup
 import com.spektra.latent.data.BenchStore
 import com.spektra.latent.data.Library
 import com.spektra.latent.engine.FilmEngine
+import com.spektra.latent.model.FilmStrip
+import com.spektra.latent.model.StripFrame
 import com.spektra.latent.model.Look
 import com.spektra.latent.ui.camera.CameraScreen
 import com.spektra.latent.ui.library.LabScreen
 import com.spektra.latent.ui.monitor.MonitorScreen
+import com.spektra.latent.ui.settings.LaunchPage
 import com.spektra.latent.ui.settings.SettingsScreen
 import com.spektra.latent.ui.settings.UpdateReminder
 import com.spektra.latent.ui.settings.UpdateScreen
@@ -52,6 +55,8 @@ sealed interface Screen {
     data object Camera : Screen
     data object Library : Screen
     data object Table : Screen
+    data object PrintQueue : Screen
+    data object Strip : Screen
     data object Settings : Screen
     data object Updates : Screen
 }
@@ -97,8 +102,10 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
     val frames = remember(rolls) { rolls.flatMap { it.frames }.sortedByDescending { it.taken } }
     val benchFrames = remember(frames, removedFromBench) { frames.filterNot { it.id in removedFromBench } }
 
-    var screen by remember { mutableStateOf<Screen>(Screen.Library) }
-    var tab by remember { mutableIntStateOf(prefs.getInt("tab", 0).coerceIn(0, 2)) }
+    var screen by remember {
+        mutableStateOf<Screen>(if (LaunchPage.saved(app) == LaunchPage.Camera) Screen.Camera else Screen.Library)
+    }
+    var tab by remember { mutableIntStateOf(0) }
     var project by remember { mutableStateOf<Long?>(null) }
     // the photograph on the workbench: the one last worked on, or else the newest
     var benchId by remember { mutableStateOf(prefs.getLong("frame", -1L)) }
@@ -107,6 +114,20 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
     var arrived by remember { mutableStateOf<Long?>(null) }
     // where the photograph on the bench was picked up, when that was not the lab: leaving goes back there
     var cameFrom by remember { mutableStateOf<Screen?>(null) }
+
+    val frameIndex = remember(frames) { frames.associateBy { it.id } }
+    var strip by remember { mutableStateOf<FilmStrip?>(null) }
+    var stripFrom by remember { mutableStateOf<Screen>(Screen.Library) }
+    var stripQueue by remember { mutableStateOf(false) }
+    fun editStrip(ids: List<Long>, name: String, from: Screen) {
+        val selected = ids.distinct().mapNotNull(frameIndex::get).sortedWith(compareBy({ it.taken }, { it.id }))
+        if (selected.size !in 2..FilmStrip.MAX_FRAMES) return
+        stripFrom = from
+        stripQueue = false
+        strip = FilmStrip(name.take(40).ifBlank { "我的胶卷" }, selected.map { StripFrame(it.id) },
+            recipe = selected.first().look.asRecipe())
+        screen = Screen.Strip
+    }
 
     // A project can disappear while another page is open. Persist the same
     // surviving photograph the bench displays, and leave a removed project.
@@ -121,11 +142,6 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
         }
     }
 
-    fun pickTab(next: Int) {
-        tab = next
-        prefs.edit().putInt("tab", next).apply()
-    }
-
     fun toBench(id: Long, from: Screen? = null, fresh: Boolean = false) {
         if (s.library.frame(id) == null) return
         benchStore.restore(id)
@@ -133,7 +149,7 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
         prefs.edit().putLong("frame", id).apply()
         if (fresh) arrived = id
         cameFrom = from
-        pickTab(0)
+        tab = 0
         screen = Screen.Library
     }
 
@@ -159,7 +175,12 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
     BackHandler(enabled = screen != Screen.Library || cameFrom != null) {
         val back = cameFrom
         cameFrom = null
-        screen = if (screen == Screen.Library && back != null) back else Screen.Library
+        screen = when {
+            screen == Screen.Strip -> stripFrom
+            screen == Screen.PrintQueue && stripQueue -> { stripQueue = false; Screen.Strip }
+            screen == Screen.Library && back != null -> back
+            else -> Screen.Library
+        }
     }
 
     // ---- the sidebar's lines, each with what is going on there
@@ -174,6 +195,7 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
         Place(Screen.Camera, Glyph.Camera, "相机", cameraFilm.ifEmpty { null }),
         Place(Screen.Library, Glyph.Lab, "冲印室", if (frames.isEmpty()) null else "${frames.size} 张"),
         Place(Screen.Table, Glyph.Table, "观片台", if (onTable == 0) null else "$onTable 张"),
+        Place(Screen.PrintQueue, Glyph.File, "冲印队列", s.prints.jobs.count { it.active }.takeIf { it > 0 }?.let { "$it 项" }),
         Place(Screen.Settings, Glyph.Settings, "设置"),
         Place(Screen.Updates, Glyph.Download, "检查更新", update.release?.let { "新版本" }),
     )
@@ -182,7 +204,7 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
         places = places,
         current = screen,
         live = screen == Screen.Camera,
-        onPlace = { cameFrom = null; screen = it },
+        onPlace = { cameFrom = null; stripQueue = false; screen = it },
         onSplash = onSplash,
     ) {
         AnimatedContent(
@@ -201,7 +223,7 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
                     monitor = s.monitor,
                     frames = benchFrames,
                     tab = tab,
-                    onTab = { cameFrom = null; project = null; pickTab(it) },
+                    onTab = { cameFrom = null; project = null; tab = it },
                     bench = bench,
                     fresh = arrived != null && arrived == bench?.id,
                     onArrived = { arrived = null },
@@ -209,17 +231,19 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
                     onRemoveBench = ::removeFromBench,
                     project = project,
                     onProject = { project = it },
+                    onStrip = { ids, name -> editStrip(ids, name, Screen.Library) },
                 )
                 Screen.Monitor -> MonitorScreen(
                     monitor = s.monitor,
                     recipes = s.recipes,
-                    onProject = { project = it; pickTab(1); screen = Screen.Library },
+                    onProject = { project = it; tab = 1; screen = Screen.Library },
                     onOpen = { toBench(it, from = Screen.Monitor) },
                 )
                 Screen.Table -> TableScreen(
                     library = s.library,
                     store = s.table,
                     onOpen = { toBench(it, from = Screen.Table) },
+                    onStrip = { ids -> editStrip(ids, "观片台胶卷", Screen.Table) },
                 )
                 Screen.Camera -> CameraScreen(
                     library = s.library,
@@ -227,6 +251,16 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
                     recipes = s.recipes,
                     onOpen = { toBench(it, from = Screen.Camera) },
                 )
+                Screen.PrintQueue -> PrintQueueScreen(s.prints)
+                Screen.Strip -> strip?.let { draft ->
+                    val overlays = LocalOverlays.current
+                    FilmStripScreen(draft, frameIndex, s.recipes, onChange = { strip = it }, onBack = { screen = stripFrom }) { format ->
+                        if (s.prints.orderStrip(draft, format) != null) {
+                            stripQueue = true
+                            screen = Screen.PrintQueue
+                        } else overlays?.toast("不能导出", "部分照片已从片库移除")
+                    }
+                }
                 Screen.Settings -> SettingsScreen(s.monitor)
                 Screen.Updates -> UpdateScreen(app.updates)
             }
@@ -234,7 +268,7 @@ private fun Places(app: LatentApp, s: Startup.Ready, incoming: List<Uri>, onInco
         ImportNotices(s.library)
         UpdateReminder(app.updates) { screen = Screen.Updates }
         // over every page: the small sign that a print is under way somewhere else than on the bench
-        PrintOverlay(s.prints, bench?.id?.takeIf { screen == Screen.Library && tab == 0 })
+        if (screen != Screen.PrintQueue) PrintOverlay(s.prints, bench?.id?.takeIf { screen == Screen.Library && tab == 0 })
     }
 }
 

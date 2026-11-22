@@ -147,7 +147,7 @@ fun MonitorScreen(monitor: Monitor, recipes: Recipes, onProject: (Long) -> Unit,
     Notice(monitor.notice, { monitor.notice = null })
 
     if (monitor.connected) Live(monitor, projects, onOpen, onProject, { colour = true }, { settings = true })
-    else Waiting(monitor, projects) { creating = true }
+    else Waiting(monitor, projects, onProject, { colour = true }, { settings = true }) { creating = true }
 
     // ---- which project, how sharp, what is burnt in
     Sheet(settings, { settings = false }, title = "监看设置") {
@@ -155,6 +155,9 @@ fun MonitorScreen(monitor: Monitor, recipes: Recipes, onProject: (Long) -> Unit,
             Ctl("原片归入项目", note = "换项目只影响之后拍的，已经收到的原片留在原来的项目里。") {
                 ProjectChips(monitor, projects, 20.dp) { settings = false; creating = true }
             }
+            Ctl("连接中断后重试", note = "相机保持接入并保留 USB 权限时，自动尝试两次。", trailing = {
+                Toggle(monitor.autoReconnect, monitor::autoReconnect, "连接中断后重试")
+            })
             Ctl("监看画质") {
                 Seg(listOf(Opt("480", "480p"), Opt("720", "720p")), monitor.resolution.toString(), { monitor.pickResolution(it.toInt()) }, Modifier.fillMaxWidth(), block = true)
             }
@@ -209,7 +212,8 @@ private fun ProjectChips(monitor: Monitor, projects: List<Roll>, bleed: androidx
 // ------------------------------------------------------------------ not connected: pick the project, then plug in
 
 @Composable
-private fun Waiting(monitor: Monitor, projects: List<Roll>, onCreate: () -> Unit) {
+private fun Waiting(monitor: Monitor, projects: List<Roll>, onProject: (Long) -> Unit,
+                    onColour: () -> Unit, onSettings: () -> Unit, onCreate: () -> Unit) {
     val shell = LocalShell.current
     val chosen = projects.any { it.id == monitor.projectId }
     GlassPage(
@@ -219,7 +223,10 @@ private fun Waiting(monitor: Monitor, projects: List<Roll>, onCreate: () -> Unit
             GlyphField(GlyphSubject.Camera(.27f), Modifier.fillMaxSize(), cell = 8.dp, noise = .12f)
         },
         chrome = {
-            TopBar(title = "监视器", sub = if (monitor.busy) monitor.status else "未连接")
+            TopBar(title = "监视器", sub = if (monitor.busy) monitor.status else "未连接", actions = {
+                IconButton(Glyph.Film, "监看色彩与配方", onColour)
+                IconButton(Glyph.More, "监看设置", onSettings)
+            })
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 Column(
                     Modifier
@@ -244,6 +251,9 @@ private fun Waiting(monitor: Monitor, projects: List<Roll>, onCreate: () -> Unit
                             Txt("和冲印室里的项目是同一份", Type.micro, color = Ink.GlassDim)
                         }
                         ProjectChips(monitor, projects, 14.dp, onCreate)
+                        monitor.projectId?.let { id ->
+                            Btn("查看项目 · 选片与交付", { onProject(id) }, Modifier.fillMaxWidth(), BtnKind.Line, icon = Glyph.Folder)
+                        }
                         if (monitor.devices.isEmpty()) {
                             Btn("查找 USB 相机", monitor::refresh, Modifier.fillMaxWidth(), BtnKind.Key, icon = Glyph.Plug, enabled = chosen && !monitor.busy)
                         } else {
@@ -274,9 +284,24 @@ private fun Live(
 ) {
     val shell = LocalShell.current
     val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    var reviewing by remember { mutableStateOf<Long?>(null) }
+    val shotForReview = monitor.recentShots.firstOrNull { it.id == reviewing }
     val picture = monitor.picture
     val project = projects.firstOrNull { it.id == monitor.projectId }
     PageScheme(light = false)
+    Sheet(shotForReview != null, { reviewing = null }, title = "联机校样") {
+        shotForReview?.let { shot ->
+            FileImage(shot.thumb, Modifier.fillMaxWidth().height(240.dp), scale = ContentScale.Fit)
+            Txt("${shot.number} · ${shot.name}", Type.label, maxLines = 2)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Btn(if (shot.picked) "取消入选" else "标记入选", {
+                    scope.launch { monitor.pick(shot.id, !shot.picked) }
+                }, Modifier.weight(1f), BtnKind.Key)
+                Btn("工作台校样", { reviewing = null; onOpen(shot.id) }, Modifier.weight(1f), BtnKind.Line)
+            }
+        }
+    }
     // a few times a second is enough for the light in the room
     var room by remember { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(Unit) {
@@ -365,9 +390,14 @@ private fun Live(
                         items(monitor.recentShots, key = { it.id }) { shot ->
                             Box(
                                 Modifier.size(46.dp).border(2.dp, Ink.Paper)
-                                    .clickable(remember { MutableInteractionSource() }, indication = null) { onOpen(shot.id) }
-                                    .semantics { contentDescription = "打开 ${shot.name}" },
-                            ) { FileImage(shot.thumb, Modifier.fillMaxSize().padding(2.dp)) }
+                                    .clickable(remember { MutableInteractionSource() }, indication = null) { reviewing = shot.id }
+                                    .semantics { contentDescription = "查看 ${shot.name}${if (shot.picked) "，已入选" else ""}" },
+                            ) {
+                                FileImage(shot.thumb, Modifier.fillMaxSize().padding(2.dp))
+                                if (shot.picked) Box(Modifier.align(Alignment.TopEnd).background(Ink.Bg)) {
+                                    Icon(Glyph.Check, tint = Ink.Accent, size = 14.dp)
+                                }
+                            }
                         }
                     }
                 }

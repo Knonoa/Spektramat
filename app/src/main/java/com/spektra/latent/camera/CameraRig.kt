@@ -64,6 +64,8 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.Observer
 import com.spektra.latent.data.Frame
 import com.spektra.latent.data.Library
+import com.spektra.latent.data.PrintDesk
+import com.spektra.latent.data.CaptureOriginal
 import com.spektra.latent.gl.CameraFilm
 import com.spektra.latent.gl.FilmEffect
 import com.spektra.latent.gl.GlCore
@@ -77,7 +79,6 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
@@ -99,11 +100,15 @@ sealed interface RigStatus {
  * them. State is read and written on the main thread.
  */
 @OptIn(ExperimentalCamera2Interop::class)
-class CameraRig(context: Context, private val library: Library, private val scope: CoroutineScope) {
+class CameraRig(
+    context: Context,
+    private val library: Library,
+    private val prints: PrintDesk,
+    private val scope: CoroutineScope,
+) {
     private val app = context.applicationContext
     private val prefs = app.getSharedPreferences("camera", Context.MODE_PRIVATE)
     private val main = ContextCompat.getMainExecutor(app)
-    private val io = Executors.newSingleThreadExecutor()
     private val film = CameraFilm(app)
     // Viewfinder and recording have separate GPU cubes. Captured originals
     // reach the full photo engine only after they have been filed.
@@ -179,12 +184,8 @@ class CameraRig(context: Context, private val library: Library, private val scop
 
     /** Thirds drawn over the viewfinder. */
     var grid by mutableStateOf(prefs.getBoolean("grid", false)); private set
-    /** Every photograph is sent to be printed as soon as it is filed. */
-    var printOnRelease by mutableStateOf(prefs.getBoolean("printOnRelease", false)); private set
     /** 0 off, 1 when the camera thinks it is needed, 2 always. In video, 2 is a steady light. */
     var flash by mutableIntStateOf(0); private set
-    /** Told about every photograph once it is in the library. */
-    var onFiled: ((Frame) -> Unit)? = null
 
     val manualExposure: Boolean get() = iso != null || shutter != null
 
@@ -239,7 +240,6 @@ class CameraRig(context: Context, private val library: Library, private val scop
     /** After [stop], when the screen is gone for good. */
     fun release() {
         film.release()
-        io.shutdown()
     }
 
     private fun bind(retry: Boolean = true, last: Boolean = true) {
@@ -619,11 +619,6 @@ class CameraRig(context: Context, private val library: Library, private val scop
         prefs.edit().putBoolean("grid", grid).apply()
     }
 
-    fun printOnRelease(on: Boolean) {
-        printOnRelease = on
-        prefs.edit().putBoolean("printOnRelease", on).apply()
-    }
-
     fun cycleFlash() {
         if (facts?.flash != true) return
         flash = if (mode == Mode.Video) (if (flash == 2) 0 else 2) else (flash + 1) % 3
@@ -632,14 +627,27 @@ class CameraRig(context: Context, private val library: Library, private val scop
 
     /** A photograph that came from somewhere else -- the phone's own camera app -- filed like one this camera took. */
     fun file(shot: File, name: String) {
+        fileAndPrint(shot, name, look, metered = 0f, releaseExport = prints.holdForCapture(), fromSystemCamera = true)
+    }
+
+    private fun fileAndPrint(shot: File, name: String, shotLook: Look, metered: Float?, releaseExport: () -> Unit,
+                             fromSystemCamera: Boolean = false) {
+        // First publish the exact CameraX bytes. The library's private copy remains the render source.
         scope.launch {
-            val frame = library.addCapture(shot, name, look, metered = 0f)
-            if (frame != null) {
+            try {
+                val originalSaved = CaptureOriginal.save(app, shot, name)
+                val frame = library.addCapture(shot, name, shotLook, metered,
+                    keepOnFailure = !originalSaved, generateThumbnail = false)
+                if (!fromSystemCamera) shooting = false
+                if (frame == null) {
+                    notice = if (originalSaved) "原片已保存到相册，但未能加入片库。" else "这一张没有存入相册或片库。"
+                    return@launch
+                }
+                if (!originalSaved) notice = "原片未能写入系统相册，已保存在片库。"
                 lastShot = frame
-                onFiled?.invoke(frame)
-            } else {
-                notice = "系统相机拍的这一张没有存下来。"
-            }
+                prints.orderCapture(frame)
+                launch { library.ensureThumbnail(frame) }
+            } finally { releaseExport() }
         }
     }
 
@@ -670,6 +678,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
         shooting = true
         exposures++
         val exposure = exposures
+        val releaseExport = prints.holdForCapture()
         scope.launch {
             delay(20_000)
             if (shooting && exposures == exposure) {
@@ -678,7 +687,7 @@ class CameraRig(context: Context, private val library: Library, private val scop
             }
         }
         val asRaw = raw
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val name = "IMG_$stamp" + if (asRaw) ".dng" else ".jpg"
         val file = File(app.cacheDir, "shot-${System.nanoTime()}" + if (asRaw) ".dng" else ".jpg")
         // Keep the camera original and its exposure; saved-photo rendering does not re-meter it.
@@ -691,25 +700,18 @@ class CameraRig(context: Context, private val library: Library, private val scop
             else -> ImageCapture.FLASH_MODE_OFF
         }
         capture.takePicture(
-            ImageCapture.OutputFileOptions.Builder(file).build(), io,
+            // CameraX writes the file on its IO executor. This callback can still run after release().
+            ImageCapture.OutputFileOptions.Builder(file).build(), main,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(saved: ImageCapture.OutputFileResults) {
-                    scope.launch {
-                        val frame = library.addCapture(file, name, shotLook, metered = if (asRaw) null else 0f)
-                        shooting = false
-                        if (frame != null) {
-                            lastShot = frame
-                            onFiled?.invoke(frame)
-                        } else {
-                            notice = "这一张没有存下来。"
-                        }
-                    }
+                    fileAndPrint(file, name, shotLook, metered = if (asRaw) null else 0f, releaseExport = releaseExport)
                 }
 
                 override fun onError(e: ImageCaptureException) {
                     Journal.e(TAG, "capture failed", e)
                     file.delete()
                     main.execute {
+                        releaseExport()
                         shooting = false
                         notice = if (asRaw) "这台手机的 RAW 没有写成文件。关掉 RAW 可以照常拍。" else "这一张没有拍下来，再按一次。"
                     }

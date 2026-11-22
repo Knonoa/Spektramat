@@ -4,9 +4,9 @@
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 ![Android 8.0+](https://img.shields.io/badge/Android-8.0%2B-3DDC84.svg)
-[![Preview](https://img.shields.io/badge/Release-Preview-orange.svg)](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3)
+[![Preview](https://img.shields.io/badge/Release-Preview-orange.svg)](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.4)
 
-中文 · [English](README.en.md) · **[下载 Android 预览版](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3)** · [观看介绍](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
+中文 · [English](README.en.md) · **[下载 Android 预览版](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.4)** · [观看介绍](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
 
 [![Spektramat：把光谱胶片冲印带到 Android](docs/media/spektramat-cover.jpg)](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
 
@@ -37,7 +37,7 @@
 **从整理到拍摄，也在这间暗房里。**
 
 - **项目片库**：双列卡片与叠放缩略图，按日期归档导入照片，支持多选、配方和批量冲印。
-- **手机相机**：GPU 胶片实时取景、JPEG/RAW 拍摄、拍后冲印与构图线；按设备能力提供镜头和手动控制，以及 1080p / 720p / 480p 视频选项。
+- **手机相机**：GPU 胶片实时取景、JPEG/RAW 拍摄、后台自动冲印与构图线；按设备能力提供镜头和手动控制，以及 1080p / 720p / 480p 视频选项。
 - **Sony USB 监视器**：USB 取景、参数读取、遥控快门与原片接收，把相机带入移动工作流。
 - **观片台**：在灯箱上拖动、缩放、旋转、吸附和整理照片，调节背光、用放大镜检查细节，再导出排布。
 - **在线更新**：侧边栏「设置」下方的「检查更新」读取 GitHub Release，展示更新说明、下载进度并调用系统安装。发现新版本时给出提醒，预览版可接收后续预览更新；下载会校验 SHA-256、应用包名与签名。
@@ -66,18 +66,20 @@
 
 需要 **Android 8.0+、OpenGL ES 3.0**；当前包含 `arm64-v8a` 与 `x86_64`，不包含 32 位 ARM。
 
-1. 在 [Release 的 Assets](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3) 下载并安装 **`Spektramat-v0.1.0-preview.3.apk`**。
-2. 进入「冲印室」，从相册、文件或其他应用导入照片。支持 JPEG、8/16 位 PNG、支持的 TIFF 与 RAW；暂不接受需要经显示缓冲降精度的 HEIF／AVIF。
+1. 在 [Release 的 Assets](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.4) 下载并安装 **`Spektramat-v0.1.0-preview.4.apk`**。
+2. 进入「冲印室」，从相册、文件或其他应用导入照片。支持 JPEG、8/16 位 PNG、WebP、兼容的 TIFF 与 RAW，以及普通 8 位 SDR HEIC／HEIF（Android 9+）和 AVIF（Android 12+，取决于设备解码器）。高位深 HEIF／AVIF 和识别到的 HDR 增益图暂不支持原精度冲印，会提示而不自动降为 8 位。
 3. 依次调整 **调节 → 胶片 → 质感 → 放大机 → 片边**，点「冲印」选择尺寸和 JPEG（默认）、PNG 或 DNG 格式。
+
+工作台可点「实况」播放兼容 Android Motion Photo 的内嵌视频。导入保留原文件，冲印处理静态封面。iPhone Live Photo 可以冲印收到的 HEIC／JPEG 封面，暂不支持配对独立 MOV 或导出实况。
 
 Android 10 及以上通过 MediaStore 保存到 `Pictures/Spektramat`，JPEG／PNG 可供相册查看，DNG 需要兼容查看器；Android 8/9 保存到应用私有 `files/prints`，可通过分享导出。相机、麦克风和照片权限按功能申请。
 
 <details>
 <summary>预览版身份与兼容性</summary>
 
-本次发布为 **debug 签名 APK**：应用 ID `com.spektra.latent.dev`，应用内版本 `0.1.0-preview.3-dev`，Release 标签 `v0.1.0-preview.3`。可与正式包 `com.spektra.latent` 并存；覆盖更新需要相同应用 ID 与签名。
+本次发布为 **debug 签名 APK**：应用 ID `com.spektra.latent.dev`，应用内版本 `0.1.0-preview.4-dev`，Release 标签 `v0.1.0-preview.4`。可与正式包 `com.spektra.latent` 并存；覆盖更新需要相同应用 ID 与签名。
 
-当前开发版本已在 Android 模拟器执行照片精度、曝光、代理与 GPU 检查；最新导出格式与任务恢复的检查记录见实施文档，尚未完成此版本真机验证。当前版本的硬件 JPEG/RAW 拍摄、视频编码稳定性与 Sony USB 联机仍需进一步真机验收，不承诺固定帧率或所有设备兼容。完整处理需要计算时间和内存；部分上游高级参数、自定义色彩空间与光源尚无界面入口。处理保持 float32；DNG 直接保存线性浮点样本，不经 F16 显示缓冲；JPEG／PNG 只在最终编码时转换为各自的文件范围和位深。没有可靠保精度解码器的输入格式会明确报错。
+Android 模拟器已覆盖照片精度、曝光、代理、GPU 及后台队列。OnePlus 7 Pro 已验证 JPEG 原片先入库，并在允许完全后台行为后息屏完成冲印；硬件 RAW 拍摄、视频编码和 Sony USB 联机仍需更多真机验证。完整处理需要计算时间和内存；部分上游高级参数、自定义色彩空间与光源尚无界面入口。处理保持 float32；DNG 直接保存线性浮点样本，不经 F16 显示缓冲；JPEG／PNG 只在最终编码时转换为各自的文件范围和位深。没有可靠保精度解码器的输入格式会明确报错。
 
 Sony 监视器在 Android 10 及以上可将额外原片复制到 `Download/Spektramat`，监看录像保存到 `Movies/Spektramat`。Android 8/9 的监看录像保存在应用专属目录，暂不支持将原片另存到公共下载目录。
 
@@ -89,7 +91,7 @@ JPEG 使用 8 位 sRGB；PNG 使用 16 位无损编码，嵌入匹配输出色�
 
 ## 原片与项目，如何保存
 
-导入会**复制**原片到应用私有片库，编辑记录单独保存，不覆盖来源照片。默认按本地日期复用 `yyyy-MM-dd` 项目；指定已有项目时保留该目标。画框上的 **×** 仅移出工作台。
+导入会**复制**原片到应用私有片库，编辑记录单独保存，不覆盖来源照片。默认按本地日期复用 `yyyy-MM-dd` 项目；指定已有项目时保留该目标。画框右下角的 **×** 需确认后才会移出工作台，原片和项目均保留。相机拍照后，未经滤镜处理的原片先写入系统相册 `DCIM/Spektramat Originals`，并存入片库；随后后台冲印，JPEG 成片另存到 `Pictures/Spektramat`。导出根据设备配置、温度和省电状态调整并发，不改变成片质量。「设置 → 默认进入页」可选工作台或相机。
 
 长按项目可选择「从 App 中删除」（持久隐藏，保留内部原片，目前没有恢复界面），或「从硬盘中删除」（二次确认后删除该项目内部原片、缩略图与编辑记录，失败项保留以便重试）。两者均保留导入来源、已导出的成片，以及同一日期目录中其他项目的照片。**卸载会清除私有片库和设置。** 路径与旧项目兼容说明见 [项目与日期目录](docs/项目删除与日期目录-2026-11-13.zh-CN.md)。
 

@@ -18,9 +18,13 @@ internal object Native {
     external fun decodeFile(path: String, maxEdge: Int, lensShading: Boolean): Long
     external fun fromBitmap(bitmap: Bitmap): Long
     external fun newFloatImage(width: Int, height: Int): Long
+    external fun creativeOptics(image: Long, softFocus: Float, flare: Float, glow: Float): Long
+    external fun accumulateExposure(image: Long, layer: Long, weights: ByteBuffer, weight: Float,
+        x: Float, y: Float, scale: Float, rotation: Float, gradient: Boolean, angle: Float, midpoint: Float, feather: Float)
     external fun newProxyImage(width: Int, height: Int, previewOnly: Boolean, lensOpcodes: Int): Long
     external fun scaled(image: Long, maxEdge: Int): Long
     external fun scaledPhoto(image: Long, maxEdge: Int, colorSpace: String, encoded: Boolean): Long
+    external fun cropScalePhoto(image: Long, x: Int, y: Int, w: Int, h: Int, outW: Int, outH: Int, colorSpace: String, encoded: Boolean): Long
     external fun cropped(image: Long, x: Int, y: Int, w: Int, h: Int): Long
     external fun imageInfo(image: Long): IntArray
     external fun imagePixels(image: Long): ByteBuffer?
@@ -69,6 +73,7 @@ internal object Native {
     external fun meterPreviewRgba(rgba: ByteBuffer, width: Int, height: Int, grade: FloatArray, method: Int): Float
     external fun renderPreviewLut(lut: Long, source: Bitmap, grade: FloatArray, autoEv: Float,
                                   finish: FloatArray, finishTable: FloatArray, out: Bitmap): String?
+    external fun limitExportWorkers(count: Int)
     external fun cancelDevelop()
     external fun cancelProof()
     external fun proofDateBounds(w:Int,h:Int,longMm:Float,rebate:Array<String>,rebateNumbers:FloatArray):FloatArray?

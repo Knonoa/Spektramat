@@ -12,8 +12,8 @@ android {
         applicationId = "com.spektra.latent"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.0-preview.3"
+        versionCode = 4
+        versionName = "0.1.0-preview.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")

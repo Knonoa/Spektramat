@@ -77,6 +77,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.spektra.latent.APP_NAME
 import com.spektra.latent.data.Frame
+import com.spektra.latent.data.HIGHLIGHT_PREF
+import com.spektra.latent.data.CreativeSource
 import com.spektra.latent.data.Library
 import com.spektra.latent.data.PrintDesk
 import com.spektra.latent.data.PrintFormat
@@ -85,6 +87,7 @@ import com.spektra.latent.data.Recipes
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.model.Format
 import com.spektra.latent.model.Look
+import com.spektra.latent.model.CreativeLook
 import com.spektra.latent.ui.Btn
 import com.spektra.latent.ui.BtnKind
 import com.spektra.latent.ui.BtnSize
@@ -125,18 +128,19 @@ import com.spektra.latent.ui.shortName
 import com.spektra.latent.ui.softShadow
 import com.spektra.latent.ui.topInset
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** The places a look can be changed, from scene corrections to the film and enlarger. */
-private enum class Step(val title: String) { Tone("调节"), Film("胶片"), Texture("质感"), Print("放大机"), Edge("片边") }
+private enum class Step(val title: String) { Tone("调节"), Film("胶片"), Creative("创意"), Texture("质感"), Print("放大机"), Edge("片边") }
 
 /**
  * The darkroom: what the lab's workbench shows once there is a photograph on
  * it. The photograph stands in the upper part of the screen with the
  * histogram over its foot; under it a strip of the photographs on the bench,
- * and a tray of glass holding the five steps of the process, each with its
+ * and a tray of glass holding the steps of the process, each with its
  * settings as rows.
  *
  * Hold the photograph to see it as it came, without the film; double-tap or
@@ -177,9 +181,14 @@ fun Darkroom(
         })
     }
     val state = remember(frame.id) { DarkroomState(context, library, frame, scope, initialAdjustmentsOnly = step == Step.Tone) }
+    val creativeSources = remember(context) { CreativeSource(context) }
+    var composingLayer by remember(frame.id) { mutableStateOf<String?>(null) }
+    var importingLayers by remember(frame.id) { mutableStateOf(false) }
     DisposableEffect(state) { onDispose { state.dispose() } }
     var collapsed by remember { mutableStateOf(false) }
     var histogram by remember { mutableStateOf(prefs.getBoolean("histogram", true)) }
+    var warning by remember { mutableStateOf(prefs.getBoolean(HIGHLIGHT_PREF, false)) }
+    var format by remember { mutableStateOf(PrintFormat.JPEG) }
     var ordering by remember { mutableStateOf(false) }
     var keeping by remember { mutableStateOf(false) }
     val saved by recipes.all.collectAsStateWithLifecycle()
@@ -190,6 +199,9 @@ fun Darkroom(
     val run = rememberPrintRun(job, pictureReady = state.proof != null || state.failure != null)
     val printing = job != null && run != null && !run.over
     LaunchedEffect(state, step, printing) { state.showAdjustmentsOnly(step == Step.Tone && !printing) }
+    LaunchedEffect(state, warning, format, step, printing) {
+        state.setHighlightWarning(format.takeIf { warning && step != Step.Tone && !printing })
+    }
     LaunchedEffect(state, step, printing) { state.previewActivity(step == Step.Film || step == Step.Print, printing) }
     LaunchedEffect(job?.id, run?.over) {
         val done = job
@@ -248,6 +260,8 @@ fun Darkroom(
                 )
                 PhotoStage(
                     state, frame, histogram, printing, run, veil.value, collapsed,
+                    warning = warning, format = format,
+                    composingLayer = composingLayer?.takeIf { id -> step == Step.Creative && state.look.creative.layers.any { it.id == id } },
                     onExpand = { collapsed = !collapsed },
                     onRemove = {
                         state.commit()
@@ -273,6 +287,10 @@ fun Darkroom(
                             histogram = !histogram
                             prefs.edit().putBoolean("histogram", histogram).apply()
                         }, on = histogram)
+                        if (step != Step.Tone) IconButton(Glyph.Sun, if (warning) "关闭高光警告" else "启用高光警告", {
+                            warning = !warning
+                            prefs.edit().putBoolean(HIGHLIGHT_PREF, warning).apply()
+                        }, on = warning)
                         Btn("冲印", { ordering = true }, Modifier.padding(horizontal = 2.dp), BtnKind.Key, BtnSize.Bar, enabled = state.ready && !printing)
                     },
                 )
@@ -340,7 +358,32 @@ fun Darkroom(
                             CtlColumn(Modifier.fillMaxWidth()) {
                                 when (step) {
                                     Step.Tone -> TonePanel(state)
-                                    Step.Film -> FilmPanel(state, frame, saved, onKeep = { keeping = true })
+                                    Step.Film -> FilmPanel(state, frame, saved, onKeep = { keeping = true }, workbench = true)
+                                    Step.Creative -> CreativePanel(state, frame, importingLayers, composingLayer, {
+                                        composingLayer = it
+                                        if (it != null) { state.compare(false); state.fit() }
+                                    }, { uris ->
+                                        if (!importingLayers) {
+                                            importingLayers = true
+                                            scope.launch {
+                                                try {
+                                                    val available = CreativeLook.MAX_LAYERS - state.look.creative.layers.size
+                                                    val report = creativeSources.import(uris, available)
+                                                    val current = state.look.creative
+                                                    val layers = (current.layers + report.layers).take(CreativeLook.MAX_LAYERS)
+                                                    if (layers != current.layers) {
+                                                        state.change(state.look.copy(creative = current.copy(layers = layers)))
+                                                        state.commit()
+                                                    }
+                                                    if (report.overflow > 0) overlays?.toast("最多合成 5 张照片", "包含当前底图，已忽略超出的照片")
+                                                    if (report.failures.isNotEmpty()) overlays?.toast("部分照片未能导入", report.failures.joinToString("、"))
+                                                } catch (cancelled: CancellationException) { throw cancelled
+                                                } catch (failure: Exception) {
+                                                    overlays?.toast("叠加照片导入失败", failure.message ?: "请重试")
+                                                } finally { importingLayers = false }
+                                            }
+                                        }
+                                    }, creativeSources::thumbnail)
                                     Step.Texture -> TexturePanel(state)
                                     Step.Print -> PrintPanel(state, frame)
                                     Step.Edge -> EdgePanel(state, state.shooting)
@@ -361,7 +404,6 @@ fun Darkroom(
     val wanted = if (requested <= 0) native else requested.coerceAtMost(native)
     val sizes = remember(native, wanted) { (listOf(2048, 3072, 4096).filter { it < native } + wanted + native).distinct().sorted() }
     var edge by remember(frame.id, wanted) { mutableStateOf(wanted) }
-    var format by remember { mutableStateOf(PrintFormat.JPEG) }
     Sheet(
         ordering, { ordering = false }, title = "冲印",
         foot = {
@@ -371,7 +413,7 @@ fun Darkroom(
                 state.compare(false)
                 state.fit()
                 library.frame(frame.id)?.let {
-                    prints.order(it, state.look, edge, format).animation.attached = true
+                    prints.order(it, state.look, edge, format, checkHighlights = warning).animation.attached = true
                 }
             }, Modifier.weight(1f), BtnKind.Key)
         },
@@ -388,6 +430,9 @@ fun Darkroom(
                 Seg(sizes.map { Opt(it.toString(), if (it == native) "原尺寸" else it.toString()) }, edge.toString(), { edge = it.toInt() }, Modifier.fillMaxWidth(), block = true)
             }
             Ctl("文件") { PrintFormatPicker(format) { format = it } }
+            if (warning) Txt(state.highlights?.label(format) ?: if (step == Step.Tone) "导出时将检查成片高光，请在冲印队列查看报告。"
+                else "精确校样正在检查高光；最终以冲印队列的报告为准。",
+                Type.micro, color = Ink.GlassDim, maxLines = 3)
         }
     }
 

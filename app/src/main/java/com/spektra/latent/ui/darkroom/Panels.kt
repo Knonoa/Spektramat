@@ -154,10 +154,10 @@ internal fun TonePanel(host: LookHost) {
  * @param onKeep asks for the current look to be kept as a recipe; null where recipes are only used
  */
 @Composable
-internal fun FilmPanel(host: LookHost, frame: Frame?, recipes: List<Recipe>, onKeep: (() -> Unit)?, bleed: Dp = TRAY_PAD) {
+internal fun FilmPanel(host: LookHost, frame: Frame?, recipes: List<Recipe>, onKeep: (() -> Unit)?, bleed: Dp = TRAY_PAD, workbench: Boolean = false) {
     val look = host.look
     Ctl("型号", value = shortName(FilmEngine.catalog.film(look.film)?.name ?: look.film), valueSet = true, valueStyle = Type.film.copy(fontSize = 12.5.sp)) {
-        StockRail(filmStocks(), look.film, { host.set(host.look.withFilm(it)) }, frame = frame, look = look, bleed = bleed)
+        StockRail(filmStocks(), look.film, { host.set(host.look.withFilm(it)) }, frame = frame, look = look, bleed = bleed, previewToggle = workbench)
     }
     // how large the frame is on the film: grain and halation are sized by it, and the edge follows it
     Ctl("片幅", value = "长边 ${Format.of(look.format).longMm.roundToInt()} mm", note = "片幅决定颗粒和光晕的尺度。") {

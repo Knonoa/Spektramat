@@ -1,6 +1,8 @@
 package com.spektra.latent.camera
 
 import android.Manifest
+import android.content.ContentUris
+import android.provider.MediaStore
 import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.view.TextureView
@@ -33,9 +35,10 @@ class CameraPhotoRouteTest {
         val app = instrument.targetContext.applicationContext as LatentApp
         instrument.uiAutomation.grantRuntimePermission(app.packageName, Manifest.permission.CAMERA)
         assertTrue(FilmEngine.start(app) == null)
-        val library = runBlocking {
-            withTimeout(30_000) { app.startup.filterIsInstance<Startup.Ready>().first().library }
+        val ready = runBlocking {
+            withTimeout(30_000) { app.startup.filterIsInstance<Startup.Ready>().first() }
         }
+        val library = ready.library
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         val rigRef = AtomicReference<CameraRig>()
         val windowRef = AtomicReference<TextureView>()
@@ -46,7 +49,7 @@ class CameraPhotoRouteTest {
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                     scaleType = PreviewView.ScaleType.FIT_CENTER
                 }
-                val rig = CameraRig(activity, library, scope)
+                val rig = CameraRig(activity, library, ready.prints, scope)
                 rigRef.set(rig)
                 val window = TextureView(activity).apply {
                     surfaceTextureListener = object : TextureView.SurfaceTextureListener {
@@ -83,12 +86,30 @@ class CameraPhotoRouteTest {
             try { capture.outputStream().use { assertTrue(pixels.compress(Bitmap.CompressFormat.JPEG, 97, it)) } }
             finally { pixels.recycle() }
             val originalBytes = capture.readBytes()
-            instrument.runOnMainSync { rig.file(capture, "CAMERA_ROUTE.jpg") }
+            val originalName = "CAMERA_ROUTE_${System.nanoTime()}"
+            instrument.runOnMainSync { rig.file(capture, "$originalName.jpg") }
             waitFor(30_000) { rig.lastShot != null }
             val frame = checkNotNull(rig.lastShot)
             assertTrue(frame.file.length() > 0)
             org.junit.Assert.assertArrayEquals(originalBytes, frame.file.readBytes())
-            assertTrue(frame.thumb.exists())
+            val media = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            val originalUri = app.contentResolver.query(media, arrayOf(MediaStore.Images.Media._ID),
+                "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ? AND ${MediaStore.Images.Media.RELATIVE_PATH} = ?",
+                arrayOf("$originalName%", "DCIM/Spektramat Originals/"), null)!!.use {
+                assertTrue("The original must already be in the system album", it.moveToFirst())
+                ContentUris.withAppendedId(media, it.getLong(0))
+            }
+            try {
+                org.junit.Assert.assertArrayEquals(originalBytes, app.contentResolver.openInputStream(originalUri)!!.use { it.readBytes() })
+            } finally { app.contentResolver.delete(originalUri, null, null) }
+            waitFor(30_000) { frame.thumb.exists() && ready.prints.jobs.any { it.frame.id == frame.id } }
+            val job = ready.prints.jobs.single { it.frame.id == frame.id }
+            assertTrue(job.cameraCapture)
+            assertTrue(ready.prints.workbenchJob(frame.id) == null)
+            waitFor(60_000) { !job.active }
+            val printed = (job.state as? com.spektra.latent.data.PrintJob.State.Done)?.printed
+            assertTrue("The camera original should be printed automatically: ${job.state}", printed?.inGallery == true)
+            printed?.let { app.contentResolver.delete(it.uri, null, null) }
             assertTrue(!frame.raw)
             instrument.runOnMainSync { rig.switchMode(Mode.Video) }
             waitFor(60_000) { rig.mode == Mode.Video && rig.previewLutReady && rig.previewFrames > 2 }

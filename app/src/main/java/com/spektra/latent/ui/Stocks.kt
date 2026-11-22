@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -29,6 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -45,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import com.spektra.latent.data.Frame
+import com.spektra.latent.data.CreativeSource
 import com.spektra.latent.data.PhotoProxyStore
 import com.spektra.latent.data.PhotoLutCache
 import com.spektra.latent.gl.PhotoPreviewRenderer
@@ -71,7 +74,9 @@ private val KINDS = listOf(Opt("", "全部"), Opt("彩色负片", "彩色负"), 
 /**
  * Film stocks or papers to choose from. With a [frame] and its [look] every
  * one is shown as that photograph wearing it, using a cached colour cube
- * on the shared source proxy; without, by name. Films can be narrowed to one kind.
+ * on the shared source proxy. The film picker can replace those samples with
+ * lightweight, stock-specific cartridge artwork. This is only a browser
+ * preference: choosing a stock still changes the photograph's look.
  *
  * @param bleed the side padding of what holds this: the row scrolls out to the edges through it
  */
@@ -84,16 +89,33 @@ fun StockRail(
     frame: Frame? = null,
     look: Look? = null,
     bleed: Dp = 0.dp,
+    previewToggle: Boolean = false,
 ) {
     val films = items.isNotEmpty() && items.all { stock -> FilmEngine.catalog.films.any { it.id == stock.id } }
     var kind by remember { mutableStateOf("") }
     val visible = if (films && kind.isNotEmpty()) items.filter { it.kind == kind } else items
-    val pictured = frame != null && look != null
     val context = LocalContext.current
-    val renderer = remember(context) { PhotoPreviewRenderer(context) }
-    DisposableEffect(renderer) { onDispose { renderer.release() } }
+    val preferences = remember(context) { context.getSharedPreferences("appearance", 0) }
+    var samplesEnabled by remember { mutableStateOf(preferences.getBoolean("filmPickerPreview", true)) }
+    val canPreview = frame != null && look != null
+    val pictured = canPreview && (!films || !previewToggle || samplesEnabled)
+    // No renderer, proxy acquisition, cube generation or sample jobs in artwork mode.
+    val renderer = remember(context, pictured) { if (pictured) PhotoPreviewRenderer(context) else null }
+    DisposableEffect(renderer) { onDispose { renderer?.release() } }
     Column(modifier) {
         if (films) {
+            if (canPreview && previewToggle) {
+                Row(
+                    Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Txt("效果预览", Type.label, Modifier.weight(1f), color = Ink.GlassDim)
+                    Toggle(samplesEnabled, {
+                        samplesEnabled = it
+                        preferences.edit().putBoolean("filmPickerPreview", it).apply()
+                    }, "胶片型号效果预览")
+                }
+            }
             val fontScale = LocalDensity.current.fontScale
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 if (maxWidth >= 300.dp * fontScale) {
@@ -130,7 +152,8 @@ fun StockRail(
                         .padding(bottom = 7.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    if (pictured) StockSample(s, films, frame!!, look!!, renderer, Modifier.size(92.dp))
+                    if (pictured) StockSample(s, films, frame!!, look!!, renderer!!, Modifier.size(92.dp))
+                    else if (films && previewToggle) FilmCartridge(s, Modifier.size(92.dp))
                     Txt(
                         shortName(s.name), Type.film.copy(fontSize = 11.sp, letterSpacing = .04.em, lineHeight = 14.3.sp),
                         Modifier.heightIn(min = 28.6.dp), color = if (on) Ink.GlassText else Ink.GlassDim, maxLines = 2,
@@ -170,8 +193,11 @@ private fun StockSample(stock: Stock, film: Boolean, frame: Frame, look: Look, r
                     val cube = PhotoLutCache.get(context, candidate.photoOrder(0L), PhotoLutCache.SAMPLE_SIZE, interactive = false)
                     PhotoProxyStore.get(context).acquire(frame, candidate.aspect, candidate.lensShading, 128).use { source ->
                         currentCoroutineContext().ensureActive()
-                        val sourceKey = "${frame.file.path}:${frame.file.length()}:${frame.file.lastModified()}:${candidate.aspect}:${candidate.lensShading}:128"
-                        val bitmap = renderer.render(source, sourceKey, candidate, cube, false, 128)
+                        val sourceKey = "${frame.file.path}:${frame.file.length()}:${frame.file.lastModified()}:${candidate.aspect}:${candidate.lensShading}:${candidate.creative}:128"
+                        val creative = if (candidate.creative.active) CreativeSource(context).apply(source, candidate, 128) else null
+                        val bitmap = try {
+                            renderer.render(creative ?: source, sourceKey, candidate, cube, false, 128)
+                        } finally { creative?.close() }
                         pending = bitmap
                         currentCoroutineContext().ensureActive()
                         try {

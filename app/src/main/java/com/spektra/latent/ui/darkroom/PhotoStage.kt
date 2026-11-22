@@ -4,6 +4,11 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateRotation
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -18,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,9 +57,13 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import com.spektra.latent.data.Frame
+import com.spektra.latent.data.MotionClip
+import com.spektra.latent.data.MotionPhoto
+import com.spektra.latent.data.PrintFormat
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.gl.Placement
 import com.spektra.latent.ui.Btn
+import com.spektra.latent.ui.BtnKind
 import com.spektra.latent.ui.BtnSize
 import com.spektra.latent.ui.FileImage
 import com.spektra.latent.ui.GlassTone
@@ -70,6 +80,8 @@ import com.spektra.latent.ui.glass
 import com.spektra.latent.ui.softShadow
 import com.spektra.latent.ui.pressable
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** A fixed viewport: only its photograph scales; gestures and drawing stay inside its edges. */
 @Composable
@@ -81,31 +93,68 @@ internal fun PhotoStage(
     run: PrintRunState?,
     veil: Float,
     expanded: Boolean,
+    warning: Boolean,
+    format: PrintFormat,
+    composingLayer: String?,
     onExpand: () -> Unit,
     onRemove: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var confirmingRemoval by remember(frame.id) { mutableStateOf(false) }
     val density = LocalDensity.current
     val proof = state.proof
     val original = state.original
     val placement = state.placement
     val comparisonMode = state.comparisonMode
     val sourceGeometry = remember(state.proofSourceQuad) { PhotoComparison.from(state.proofSourceQuad) }
-    val split = comparisonMode == ComparisonMode.Split && !printing && proof != null && original != null && sourceGeometry != null
+    val split = composingLayer == null && comparisonMode == ComparisonMode.Split && !printing && proof != null && original != null && sourceGeometry != null
     var choosingComparison by remember { mutableStateOf(false) }
+    var clip by remember(frame.file) { mutableStateOf<MotionClip?>(null) }
+    var playing by remember(frame.file) { mutableStateOf(false) }
+    LaunchedEffect(frame.file) {
+        clip = withContext(Dispatchers.IO) { MotionPhoto.read(frame.file) }
+    }
+
     BoxWithConstraints(
         modifier
             .clipToBounds()
             .onSizeChanged { state.layout(it.width.toFloat(), it.height.toFloat()) }
             .semantics {
                 contentDescription = "照片预览"
-                stateDescription = "缩放 ${(placement.scale * 100).roundToInt()}%"
+                stateDescription = if (composingLayer == null) "缩放 ${(placement.scale * 100).roundToInt()}%" else "正在编辑叠加构图"
             }
-            .pointerInput(state, printing) {
-                if (!printing) detectTransformGestures { centroid, pan, zoom, _ -> state.transform(centroid, pan, zoom) }
+            .pointerInput(state, printing, composingLayer) {
+                if (!printing && composingLayer == null) detectTransformGestures { centroid, pan, zoom, _ -> state.transform(centroid, pan, zoom) }
+                else if (!printing && composingLayer != null) awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val shown = state.shownSize
+                    val fit = PhotoViewport.fit(size.width.toFloat(), size.height.toFloat(), shown[0], shown[1])
+                    val gate = gateBounds(state.proofGate)
+                    val place = state.placement
+                    val w = fit.width * place.scale; val h = fit.height * place.scale
+                    val x = (size.width - w) / 2 + place.panX; val y = (size.height - h) / 2 + place.panY
+                    if (w * gate.width < 1 || h * gate.height < 1 || down.isConsumed ||
+                        down.position.x !in (x + gate.left * w)..(x + gate.right * w) ||
+                        down.position.y !in (y + gate.top * h)..(y + gate.bottom * h)) return@awaitEachGesture
+                    var changed = false
+                    try {
+                        do {
+                            val event = awaitPointerEvent()
+                            if (event.changes.any { it.isConsumed }) break
+                            val pan = event.calculatePan()
+                            val zoom = event.calculateZoom()
+                            val rotation = event.calculateRotation()
+                            if (pan != Offset.Zero || zoom != 1f || rotation != 0f) {
+                                state.transformLayer(composingLayer, pan.x / (w * gate.width), pan.y / (h * gate.height), zoom, rotation)
+                                changed = true
+                                event.changes.forEach { it.consume() }
+                            }
+                        } while (event.changes.any { it.pressed })
+                    } finally { if (changed) state.commit() }
+                }
             }
-            .pointerInput(state, printing, comparisonMode) {
-                if (!printing) detectTapGestures(
+            .pointerInput(state, printing, comparisonMode, composingLayer) {
+                if (!printing && composingLayer == null) detectTapGestures(
                     onDoubleTap = { state.toggleZoom(it) },
                     onLongPress = if (comparisonMode == ComparisonMode.Hold) ({ state.compare(true) }) else null,
                     onPress = { try { tryAwaitRelease() } finally { state.compare(false) } },
@@ -145,6 +194,9 @@ internal fun PhotoStage(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+            if (warning && !split && !state.comparing && !printing) state.highlightOverlay?.let {
+                Image(it, "高光警告区域", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            }
             if (printing && proof != null && run != null) {
                 val gate = gateBounds(state.proofGate)
                 val film = FilmEngine.catalog.film(state.look.film)
@@ -174,8 +226,13 @@ internal fun PhotoStage(
                 Txt("原图  ← 拖动分隔线 →  效果", Type.micro, color = Ink.GlassText)
             }
         }
-        Box(Modifier.align(Alignment.TopStart).padding(4.dp).glass(20.dp, GlassTone.Thin, shadow = false)) {
-            IconButton(Glyph.Close, "从工作台移除", onRemove, size = 36.dp, enabled = !printing)
+        if (clip != null && !printing && composingLayer == null) {
+            Box(Modifier.align(Alignment.TopStart).padding(4.dp).glass(20.dp, GlassTone.Thin, shadow = false)) {
+                Btn("实况", { playing = true }, size = BtnSize.Small)
+            }
+        }
+        Box(Modifier.align(Alignment.BottomEnd).padding(4.dp).glass(20.dp, GlassTone.Thin, shadow = false)) {
+            IconButton(Glyph.Close, "从工作台移除", { confirmingRemoval = true }, size = 40.dp, enabled = !printing)
         }
         Row(
             Modifier.align(Alignment.TopEnd).padding(4.dp).glass(20.dp, GlassTone.Thin, shadow = false),
@@ -185,7 +242,19 @@ internal fun PhotoStage(
             IconButton(Glyph.Fit, "适合画框", state::fit, size = 36.dp, enabled = !printing)
             Btn(if (expanded) "显示调节" else "查看大图", onExpand, size = BtnSize.Small, enabled = !printing)
         }
-        if (!state.adjustmentsOnly && !printing && proof != null) {
+        if (warning && !state.adjustmentsOnly && !printing && !state.comparing && !split && proof != null) {
+            val report = state.highlights
+            Txt(report?.label(format) ?: "正在等待精确校样…", Type.micro,
+                Modifier.align(Alignment.TopCenter).padding(top = 46.dp, start = 6.dp, end = 6.dp)
+                    .glass(10.dp, GlassTone.Thin, shadow = false).padding(horizontal = 8.dp, vertical = 4.dp),
+                color = Ink.GlassText, maxLines = 2)
+        }
+        if (composingLayer != null && !printing) {
+            Txt("构图 · 拖动 / 双指缩放和旋转", Type.micro,
+                Modifier.align(Alignment.BottomStart).padding(8.dp).glass(10.dp, GlassTone.Thin, shadow = false)
+                    .padding(horizontal = 8.dp, vertical = 4.dp), color = Ink.GlassText, maxLines = 1)
+        }
+        if (composingLayer == null && !state.adjustmentsOnly && !printing && proof != null) {
             Txt(if (state.exact) "精确校样" else "快速预览 · 点按精确校样", Type.micro,
                 Modifier.align(Alignment.BottomStart).padding(8.dp).pressable(onClick = state::requestExact)
                     .semantics { contentDescription = "生成精确校样；颗粒、光晕、片边和日期以完整校样及导出为准" }
@@ -193,6 +262,15 @@ internal fun PhotoStage(
                 color = Ink.GlassDim)
         }
     }
+    if (confirmingRemoval && !printing) {
+        Sheet(true, { confirmingRemoval = false }, title = "从工作台移除这张照片？", foot = {
+            Btn("取消", { confirmingRemoval = false }, Modifier.weight(1f))
+            Btn("确认移除", { confirmingRemoval = false; onRemove() }, Modifier.weight(1f), BtnKind.Danger)
+        }) {
+            Txt("只从工作台移除。原片和项目中的照片会保留。", Type.body, maxLines = 3)
+        }
+    }
+    if (playing && !printing) clip?.let { MotionPhotoDialog(frame.file, it) { playing = false } }
     Sheet(choosingComparison, { choosingComparison = false }, title = "查看原图") {
         Seg(
             ComparisonMode.entries.map { Opt(it.name, it.label) }, comparisonMode.name,

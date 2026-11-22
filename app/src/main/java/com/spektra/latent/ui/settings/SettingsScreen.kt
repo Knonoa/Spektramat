@@ -1,6 +1,8 @@
 package com.spektra.latent.ui.settings
 
 import android.content.Context
+import android.content.Intent
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -61,6 +63,7 @@ import com.spektra.latent.ui.Toggle
 import com.spektra.latent.ui.TopBar
 import com.spektra.latent.ui.Txt
 import com.spektra.latent.ui.Type
+import com.spektra.latent.data.HIGHLIGHT_PREF
 import com.spektra.latent.ui.bottomInset
 import com.spektra.latent.ui.topInset
 
@@ -73,9 +76,9 @@ fun SettingsScreen(monitor: Monitor) {
     val context = LocalContext.current
     val shell = LocalShell.current
     val appearance = remember { context.getSharedPreferences("appearance", Context.MODE_PRIVATE) }
-    val camera = remember { context.getSharedPreferences("camera", Context.MODE_PRIVATE) }
+    var launchPage by remember { mutableStateOf(LaunchPage.saved(context)) }
+    var warning by remember { mutableStateOf(appearance.getBoolean(HIGHLIGHT_PREF, false)) }
     var edge by remember { mutableIntStateOf(appearance.getInt("exportEdge", 0)) }
-    var printOnRelease by remember { mutableStateOf(camera.getBoolean("printOnRelease", false)) }
 
     GlassPage(
         behind = {
@@ -107,22 +110,33 @@ fun SettingsScreen(monitor: Monitor) {
                         )
                     }
                     Line("减少动效", "停掉字符矩阵的跳动、水滴的拉伸和显影动画。") { Toggle(shell.reduced, shell::changeReduced, "减少动效") }
+                    Line("默认进入页", "下次打开应用时进入所选页面。") {
+                        Seg(LaunchPage.entries.map { Opt(it.name, it.label) }, launchPage.name, {
+                            launchPage = LaunchPage.valueOf(it)
+                            launchPage.save(context)
+                        }, style = SegStyle.Small)
+                    }
                     Line("启动画面", "SPEKTRAMAT 从字符矩阵里立起来。") { Btn("再看一次", shell::replaySplash, kind = BtnKind.Line, size = BtnSize.Small) }
                 }
 
                 Section("冲印")
                 Card {
+                    Line("高光警告", "在工作台的精确校样上标记接近白位和超白的区域。只检查，不改变照片。") {
+                        Toggle(warning, { warning = it; appearance.edit().putBoolean(HIGHLIGHT_PREF, it).apply() }, "高光警告")
+                    }
                     Line("默认导出长边", "单位是像素。比原片大的时候按原片的尺寸出。") {
                         Seg(listOf(0, 2048, 3072, 4096).map { Opt(it.toString(), if (it == 0) "原尺寸" else it.toString()) }, edge.toString(), {
                             edge = it.toInt()
                             appearance.edit().putInt("exportEdge", edge).apply()
                         }, style = SegStyle.Small)
                     }
-                    Line("拍下即冲印", "相机按下快门就冲一张成片。关着时只存原片。") {
-                        Toggle(printOnRelease, {
-                            printOnRelease = it
-                            camera.edit().putBoolean("printOnRelease", it).apply()
-                        }, "拍下即冲印")
+                    Line("相机拍照保存", "先将未加滤镜的原片存入相册，再在后台冲印并另存 JPEG 成片。") { Value("自动冲印") }
+                    Line("后台冲印", "如果锁屏或退到桌面后冲印暂停，可在系统的应用电池设置中允许后台活动。") {
+                        Btn("系统设置", {
+                            val page = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.fromParts("package", context.packageName, null))
+                            context.startActivity(page)
+                        }, kind = BtnKind.Line, size = BtnSize.Small)
                     }
                     Line("联机原片同时存到手机", "监视器收到的原片，在 Download/${APP_NAME} 里再留一份。") {
                         Toggle(monitor.publicCopy, monitor::publicCopy, "联机原片同时存到手机")

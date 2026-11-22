@@ -167,7 +167,8 @@ class PrintRunLifecycleTest {
                     visible.value = true
                 }
                 await("Returning must finish and acknowledge the saved animation") { job.animation.acknowledged }
-                await("The finished tile can clear after the animation was acknowledged") { job !in desk.jobs }
+                await("The finished tile can hide after the animation was acknowledged") { job.badgeHidden }
+                onMain { assertTrue("A hidden badge must not erase the queue's delivery record", job in desk.jobs) }
             }
         } finally { scope.cancel(); bitmap.recycle() }
     }

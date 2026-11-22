@@ -4,9 +4,9 @@
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 ![Android 8.0+](https://img.shields.io/badge/Android-8.0%2B-3DDC84.svg)
-[![Preview](https://img.shields.io/badge/Release-Preview-orange.svg)](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3)
+[![Preview](https://img.shields.io/badge/Release-Preview-orange.svg)](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.4)
 
-[中文](README.md) · English · **[Download Android preview](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3)** · [Watch the introduction](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
+[中文](README.md) · English · **[Download Android preview](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.4)** · [Watch the introduction](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
 
 [![Spektramat: a spectral film darkroom for Android](docs/media/spektramat-cover.jpg)](https://github.com/Knonoa/Spektramat/releases/download/v0.1.0-preview.1/spektramat-intro.mp4)
 
@@ -37,7 +37,7 @@ Adjust in portrait, or turn the phone to place the photograph beside its control
 **Organization and capture belong in the same darkroom.**
 
 - **Project library:** two-column cards with stacked thumbnails, date-based imports, selection, recipes and batch printing.
-- **Phone camera:** GPU film preview, JPEG/RAW capture, printing after capture and composition guides; lens and manual controls follow device capabilities, as do 1080p / 720p / 480p video options.
+- **Phone camera:** GPU film preview, JPEG/RAW capture, automatic background printing and composition guides; lens and manual controls follow device capabilities, as do 1080p / 720p / 480p video options.
 - **Sony USB monitor:** USB live view, shooting parameters, remote shutter and original-file transfer bring the camera into a mobile workflow.
 - **Light table:** drag, scale, rotate, snap and arrange photographs, adjust the backlight, inspect with a loupe and export the arrangement.
 - **Online updates:** “检查更新” (Check for Updates), directly below Settings in the sidebar, reads GitHub Releases, shows release notes and download progress, and opens Android's installer. New versions trigger an in-app reminder, including subsequent preview releases. Downloads are checked for SHA-256, package identity and signing certificate.
@@ -66,18 +66,20 @@ See the [workbench preview implementation record](docs/工作台快速预览实�
 
 Requires **Android 8.0+ and OpenGL ES 3.0**. Current builds include `arm64-v8a` and `x86_64`, without 32-bit ARM.
 
-1. Download and install **`Spektramat-v0.1.0-preview.3.apk`** from the [Release Assets](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.3).
-2. Open “冲印室” (Darkroom) and import from the gallery, files or another app. JPEG, 8/16-bit PNG, supported TIFF and RAW files are accepted. HEIF/AVIF are temporarily refused when no precision-preserving decoder is available.
+1. Download and install **`Spektramat-v0.1.0-preview.4.apk`** from the [Release Assets](https://github.com/Knonoa/Spektramat/releases/tag/v0.1.0-preview.4).
+2. Open “冲印室” (Darkroom) and import from the gallery, files or another app. JPEG, 8/16-bit PNG, WebP, supported TIFF and RAW, and standard 8-bit SDR HEIC/HEIF (Android 9+) and AVIF (Android 12+, device decoder required) are accepted. Unsupported high-bit-depth HEIF/AVIF and HDR gain maps are rejected rather than reduced to 8-bit.
 3. Work through **调节 → 胶片 → 质感 → 放大机 → 片边** (Adjustments → Film → Texture → Enlarger → Film Edge), then tap “冲印” (Print) to select a size and JPEG (default), PNG or DNG format.
+
+Tap “实况” (Motion) on the workbench to play the embedded video of compatible Android Motion Photos. Import keeps the original file intact, and printing uses the still cover. For iPhone Live Photos, the received HEIC/JPEG still can be printed; pairing a separate MOV and exporting motion are not supported yet.
 
 On Android 10 and newer, MediaStore saves prints under `Pictures/Spektramat`. JPEG and PNG are gallery-friendly; DNG needs a compatible viewer. Android 8/9 uses private `files/prints` storage with export through sharing. Camera, microphone and photo permissions are requested as features need them.
 
 <details>
 <summary>Preview identity and compatibility</summary>
 
-This release uses a **debug-signed APK**: application ID `com.spektra.latent.dev`, in-app version `0.1.0-preview.3-dev`, Release tag `v0.1.0-preview.3`. It can coexist with the release package `com.spektra.latent`; updates require the same application ID and signing key.
+This release uses a **debug-signed APK**: application ID `com.spektra.latent.dev`, in-app version `0.1.0-preview.4-dev`, Release tag `v0.1.0-preview.4`. It can coexist with the release package `com.spektra.latent`; updates require the same application ID and signing key.
 
-Photo precision, exposure, proxy and GPU checks have run on Android emulators. The implementation notes record the latest export-format and job-resume checks; physical-device validation of this revision is still pending. Hardware JPEG/RAW capture, video encoding stability and Sony USB tethering still need further testing with this version; there is no fixed frame-rate or universal device-compatibility guarantee. Full processing takes time and memory. Some advanced upstream parameters, custom color spaces and illuminants have no UI controls yet. Processing stays in float32. DNG stores linear floating-point samples without an F16 display buffer; JPEG and PNG convert to their file ranges and bit depths only during final encoding. Formats without a precision-preserving decoder produce an explicit error.
+Photo precision, exposure, proxies, GPU rendering and the background queue were tested on Android emulators. A OnePlus 7 Pro saved the JPEG original first and completed a print with its screen off after unrestricted background battery use was enabled. Hardware RAW capture, video encoding and Sony USB tethering still need more physical-device testing. Full processing takes time and memory. Some advanced upstream parameters, custom color spaces and illuminants have no UI controls yet. Processing stays in float32. DNG stores linear floating-point samples without an F16 display buffer; JPEG and PNG convert to their file ranges and bit depths only during final encoding. Formats without a precision-preserving decoder produce an explicit error.
 
 On Android 10 and newer, the Sony monitor can copy extra originals to `Download/Spektramat` and save monitor recordings to `Movies/Spektramat`. On Android 8/9, monitor recordings use app-specific storage; copying originals to the public Downloads folder is unavailable.
 
@@ -89,7 +91,7 @@ JPEG uses 8-bit sRGB; PNG uses lossless 16-bit encoding with an ICC profile matc
 
 ## How originals and projects are kept
 
-Imports **copy** originals into the app's private library. Edits are stored separately and never overwrite source photographs. Default imports reuse a project named `yyyy-MM-dd` for the local date; importing into a selected project keeps that destination. The **×** on the photo only removes its workbench entry.
+Imports **copy** originals into the app's private library. Edits are stored separately and never overwrite source photographs. Default imports reuse a project named `yyyy-MM-dd` for the local date; importing into a selected project keeps that destination. The **×** at the bottom right of the photo asks for confirmation and removes only its workbench entry. The camera first saves the untouched original in the system album `DCIM/Spektramat Originals` and in the private library. It then queues the JPEG print in the background and saves it separately to `Pictures/Spektramat`. Export adjusts CPU usage to the device, temperature and power state without changing output quality. In Settings, choose Workbench or Camera as the launch page.
 
 Long-press a project to choose “从 App 中删除” (Remove from app: persistently hide it and keep internal originals; no restore UI yet), or “从硬盘中删除” (Delete from disk: a second confirmation removes that project's internal originals, thumbnails and edits, retaining failed items for retry). Both preserve import sources, exported prints and other projects' photographs in the same date directory. **Uninstalling clears the private library and settings.** See [project and date-directory behavior](docs/项目删除与日期目录-2026-11-13.zh-CN.md) for paths and legacy-project compatibility (Chinese).
 

@@ -75,6 +75,8 @@ import com.spektra.latent.data.PrintFormat
 import com.spektra.latent.data.Recipes
 import com.spektra.latent.data.Roll
 import com.spektra.latent.tether.Monitor
+import com.spektra.latent.model.FilmStrip
+import com.spektra.latent.ui.Chip
 import com.spektra.latent.ui.Btn
 import com.spektra.latent.ui.BtnKind
 import com.spektra.latent.ui.BtnSize
@@ -108,6 +110,8 @@ import com.spektra.latent.ui.Type
 import com.spektra.latent.ui.bottomInset
 import com.spektra.latent.ui.darkroom.Darkroom
 import com.spektra.latent.ui.darkroom.recipeLine
+import com.spektra.latent.data.ContactSheet
+import com.spektra.latent.ui.sharePrints
 import com.spektra.latent.ui.glass
 import com.spektra.latent.ui.leftInset
 import com.spektra.latent.ui.rightInset
@@ -148,6 +152,7 @@ fun LabScreen(
     onRemoveBench: (Long) -> Unit,
     project: Long?,
     onProject: (Long?) -> Unit,
+    onStrip: (List<Long>, String) -> Unit,
 ) {
     val app = LocalContext.current.applicationContext as LatentApp
     val importing by library.importing.collectAsStateWithLifecycle()
@@ -189,7 +194,7 @@ fun LabScreen(
             )
             "empty" -> BenchEmpty(importing != null, ::pickPhotos, ::pickFiles, tabs)
             "projects" -> Projects(library, monitor, onProject, tabs)
-            "project" -> ProjectPhotos(library, recipes, prints, project, { onProject(null) }, { onBench(it, false) }, tabs)
+            "project" -> ProjectPhotos(library, recipes, prints, project, { onProject(null) }, { onBench(it, false) }, onStrip, tabs)
             else -> AlbumBrowser(library, { onBench(it, true) }, tabs)
         }
     }
@@ -199,7 +204,7 @@ fun LabScreen(
         Txt("原文件会被复制进来，之后的调整都不会改动它。", Type.micro.copy(lineHeight = 17.6.sp), color = Ink.GlassDim, maxLines = 2)
         Gap(height = 8.dp)
         CtlColumn(Modifier.fillMaxWidth()) {
-            SheetRow(Glyph.Album, "从相册选照片", "JPEG、HEIF、PNG") { source = false; pickPhotos() }
+            SheetRow(Glyph.Album, "从相册选照片", "JPEG、HEIC／HEIF、PNG、WebP、AVIF") { source = false; pickPhotos() }
             SheetRow(Glyph.File, "从文件选 RAW", "DNG、ARW、CR2 / CR3、NEF、RAF、RW2、ORF …") { source = false; pickFiles() }
         }
     }
@@ -264,7 +269,7 @@ private fun BenchEmpty(busy: Boolean, onPhotos: () -> Unit, onFiles: () -> Unit,
                 ) {
                     Txt("把底片放上来", if (compact) Type.h1 else Type.display)
                     Txt(
-                        if (busy) "正在读取原片…" else "RAW、DNG、JPEG、HEIF 都可以，导入后直接开始冲印。",
+                        if (busy) "正在读取原片…" else "可导入 JPEG、PNG、HEIC、WebP、AVIF 和支持的 RAW。",
                         Type.body.copy(lineHeight = 24.5.sp), Modifier.widthIn(max = 336.dp), color = Ink.Dim, maxLines = 3,
                     )
                     Row(
@@ -495,14 +500,20 @@ internal fun NewProject(visible: Boolean, onDismiss: () -> Unit, name: String, o
 @Composable
 private fun ProjectPhotos(
     library: Library, recipes: Recipes, prints: PrintDesk, projectId: Long?,
-    onBack: () -> Unit, onOpen: (Long) -> Unit, tabs: @Composable () -> Unit,
+    onBack: () -> Unit, onOpen: (Long) -> Unit, onStrip: (List<Long>, String) -> Unit, tabs: @Composable () -> Unit,
 ) {
     val rolls by library.rolls.collectAsStateWithLifecycle()
     val roll = rolls.firstOrNull { it.id == projectId }
+    val context = LocalContext.current
     val shell = LocalShell.current
     val scope = rememberCoroutineScope()
     val overlays = LocalOverlays.current
     val saved by recipes.all.collectAsStateWithLifecycle()
+    var onlyPicked by remember(projectId) { mutableStateOf(false) }
+    var delivery by remember(projectId) { mutableStateOf(false) }
+    var contact by remember(projectId) { mutableStateOf<ContactSheet.Result?>(null) }
+    var contactProgress by remember(projectId) { mutableStateOf<Pair<Int, Int>?>(null) }
+    val picked = roll?.frames.orEmpty().filter { it.picked }
     var selecting by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf(setOf<Long>()) }
     var grouping by remember { mutableStateOf(false) }
@@ -521,7 +532,7 @@ private fun ProjectPhotos(
     GlassPage(
         behind = {
             Box(Modifier.fillMaxSize().background(Ink.Bg))
-            val frames = roll?.frames.orEmpty().sortedByDescending { it.taken }
+            val frames = roll?.frames.orEmpty().filter { !onlyPicked || it.picked }.sortedByDescending { it.taken }
             LazyVerticalGrid(
                 GridCells.Adaptive(108.dp), Modifier.fillMaxSize().padding(start = shell.insetLeft + leftInset(), end = rightInset()),
                 contentPadding = PaddingValues(top = topInset(), bottom = (if (selecting) 96.dp else 28.dp) + bottomInset()),
@@ -532,13 +543,17 @@ private fun ProjectPhotos(
                         IconButton(Glyph.Back, "返回项目", onBack)
                         Column {
                             Txt(roll?.name ?: "项目", Type.h1)
-                            Txt("${frames.size} 张", Type.numSmall)
+                            Txt("${roll?.frames.orEmpty().size} 张 · 入选 ${picked.size} 张", Type.numSmall)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Chip("全部", !onlyPicked, { onlyPicked = false; leave() })
+                                Chip("入选", onlyPicked, { onlyPicked = true; leave() })
+                            }
                         }
                     }
                 }
                 if (frames.isEmpty()) item(key = "none", span = { GridItemSpan(maxLineSpan) }) {
                     Txt(
-                        "这个项目还是空的。到「全部」里选几张照片，归入这个项目。", Type.body.copy(lineHeight = 25.sp),
+                        if (onlyPicked) "还没有入选照片。长按选片，或在联机校样中标记入选。" else "这个项目还是空的。到「全部」里选几张照片，归入这个项目。", Type.body.copy(lineHeight = 25.sp),
                         Modifier.padding(horizontal = 16.dp, vertical = 26.dp).widthIn(max = 336.dp), color = Ink.Dim, maxLines = 3,
                     )
                 }
@@ -553,7 +568,14 @@ private fun ProjectPhotos(
                             selecting = true
                             selection = selection + f.id
                         },
-                    ) { FileImage(f.thumb, Modifier.fillMaxSize()) }
+                    ) {
+                        Box(Modifier.fillMaxSize()) {
+                            FileImage(f.thumb, Modifier.fillMaxSize())
+                            if (f.picked) Box(Modifier.align(Alignment.TopStart).background(Ink.Bg).padding(3.dp)) {
+                                Icon(Glyph.Check, tint = Ink.Accent, size = 16.dp)
+                            }
+                        }
+                    }
                 }
             }
         },
@@ -562,11 +584,26 @@ private fun ProjectPhotos(
             TopBar(
                 tabs = tabs,
                 actions = if (roll?.frames.isNullOrEmpty() && !selecting) null else ({
+                    if (!selecting && picked.isNotEmpty()) Btn("交付", { delivery = true }, kind = BtnKind.Key, size = BtnSize.Bar, icon = Glyph.Share)
+                    if (selecting && selection.size >= 2) {
+                        IconButton(Glyph.Film, "制作整卷胶片", {
+                            val ids = chosen().map { it.id }
+                            if (ids.size > FilmStrip.MAX_FRAMES) overlays?.toast("胶卷最多 ${FilmStrip.MAX_FRAMES} 格")
+                            else if (ids.size >= 2) onStrip(ids, roll?.name.orEmpty())
+                        })
+                    }
                     IconButton(if (selecting) Glyph.Close else Glyph.Select, if (selecting) "取消选择" else "选择", { if (selecting) leave() else selecting = true })
                 }),
             )
             SelectionTray(selecting, selection.size) {
                 val any = selection.isNotEmpty()
+                val mark = chosen().any { !it.picked }
+                IconButton(Glyph.Check, if (mark) "标记入选" else "取消入选", {
+                    val ids = selection
+                    leave()
+                    scope.launch { library.setPicked(ids, mark) }
+                    overlays?.toast(if (mark) "已标记入选" else "已取消入选", "${ids.size} 张")
+                }, enabled = any)
                 IconButton(Glyph.Folder, "归入项目", { grouping = true }, enabled = any)
                 IconButton(Glyph.Recipe, "套用配方", { applying = true }, enabled = any)
                 IconButton(Glyph.Trash, "删除", { deleting = true }, enabled = any, tint = Ink.Rec)
@@ -625,7 +662,7 @@ private fun ProjectPhotos(
                 val frames = chosen()
                 printing = false
                 leave()
-                for (f in frames) prints.order(f, f.look, if (edge == 0) f.longEdge else edge, format)
+                prints.orderBatch(frames, edge, format, batch = java.util.UUID.randomUUID().toString())
                 overlays?.toast("已经排进冲印队列", "${frames.size} 张")
             }, Modifier.weight(1f), BtnKind.Key)
         },
@@ -635,6 +672,49 @@ private fun ProjectPhotos(
                 Seg(listOf(Opt("2048", "2048"), Opt("3072", "3072"), Opt("4096", "4096"), Opt("0", "原尺寸")), edge.toString(), { edge = it.toInt() }, Modifier.fillMaxWidth(), block = true)
             }
             Ctl("文件") { PrintFormatPicker(format) { format = it } }
+        }
+    }
+    Sheet(delivery, { delivery = false }, title = "交付 · ${picked.size} 张入选", foot = {
+        Btn("排进冲印队列", {
+            prints.orderBatch(picked, edge, format, batch = java.util.UUID.randomUUID().toString())
+            delivery = false
+            overlays?.toast("已加入冲印队列", "完成后可在队列里分享这一批。")
+        }, Modifier.weight(1f), BtnKind.Key, enabled = picked.isNotEmpty())
+    }) {
+        CtlColumn(Modifier.fillMaxWidth()) {
+            Ctl("按各自的设置冲印", note = "逐张读取原片。完成后可从冲印队列分享整批成片。") {
+                Seg(listOf(Opt("2048", "2048"), Opt("3072", "3072"), Opt("4096", "4096"), Opt("0", "原尺寸")),
+                    edge.toString(), { edge = it.toInt() }, Modifier.fillMaxWidth(), block = true)
+                PrintFormatPicker(format) { format = it }
+            }
+            Ctl("接触印样", note = "按片号排列入选照片，原片渲染，每页最多 24 张，导出编号 JPEG。") {
+                val progress = contactProgress
+                Btn(progress?.let { "正在排版 ${it.first}/${it.second}" } ?: "生成接触印样", {
+                    val frames = picked.toList()
+                    val title = roll?.name.orEmpty()
+                    contactProgress = 0 to frames.size
+                    contact = null
+                    scope.launch {
+                        try {
+                            contact = ContactSheet.export(context, title, frames) { count ->
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { contactProgress = count to frames.size }
+                            }
+                        } finally { contactProgress = null }
+                    }
+                }, Modifier.fillMaxWidth(), BtnKind.Line, enabled = picked.isNotEmpty() && progress == null)
+                contact?.let { result ->
+                    if (result.pages.isNotEmpty()) {
+                        val public = result.pages.count { it.inGallery }
+                        val private = result.pages.size - public
+                        Txt("已保存 $public 页到相册${if (private > 0) " · $private 页在应用内" else ""}", Type.micro, maxLines = 2)
+                        Btn("分享接触印样", {
+                            runCatching { sharePrints(context, result.pages.map { it.uri to "image/jpeg" }) }
+                                .onFailure { overlays?.toast("无法分享印样", it.message ?: "") }
+                        }, Modifier.fillMaxWidth(), BtnKind.Line, icon = Glyph.Share)
+                    }
+                    result.error?.let { Txt(it, Type.micro, color = Ink.Rec, maxLines = 3) }
+                }
+            }
         }
     }
     Sheet(

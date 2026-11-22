@@ -30,6 +30,13 @@ internal object PrintEncoding {
         return decoded.toFloat()
     }
 
+    /** Normalized transfer value used to compare a linear highlight threshold to encoded pixels. */
+    fun encoded(value: Float, model: PhotoModel): Float = when (model.outputColorSpace) {
+        "Adobe RGB (1998)" -> value.pow(256f / 563f)
+        "ProPhoto RGB" -> if (value <= .001953125f) value * 16f else value.pow(1f / 1.8f)
+        else -> if (value <= .0031308f) 12.92f * value else 1.055f * value.pow(1f / 2.4f) - .055f
+    }
+
     /** Row-major linear RGB to D50 XYZ, adapted without passing samples through a clamping connector. */
     fun xyzD50(model: PhotoModel): DoubleArray {
         val source = ColorSpace.get(when (model.outputColorSpace) {

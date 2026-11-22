@@ -37,6 +37,8 @@ data class Look(
     val lensShading: Boolean = true,
     /** The shape the picture is cut to, "3:2" and the like (Aspects); empty for the whole picture. */
     val aspect: String = "",
+    /** Optional optical effects and private sources belonging to this photograph. */
+    val creative: CreativeLook = CreativeLook(),
     // ---- the film
     val film: String = DEFAULT_FILM,
     /** The film format (Format.id): how large the frame is on the film, and which film its edge is. */
@@ -94,12 +96,14 @@ data class Look(
         exposure = exposure, temperature = temperature, tint = tint, contrast = contrast,
         highlights = highlights, shadows = shadows, whites = whites, blacks = blacks,
         vibrance = vibrance, saturation = saturation, lensShading = lensShading, aspect = aspect,
+        creative = recipe.creative.copy(baseWeight = creative.baseWeight, layers = creative.layers),
         edge = recipe.edge.copy(frameNumber = 0),
         date = recipe.date.copy(manual = date.manual),
     )
 
     /** The part of this look a recipe keeps: everything [withRecipe] hands on, on an untouched scene. */
-    fun asRecipe(): Look = Look().withRecipe(this).copy(date = date.copy(manual = ""))
+    fun asRecipe(): Look = Look().withRecipe(this).copy(date = date.copy(manual = ""),
+        creative = creative.copy(baseWeight = 100f, layers = emptyList()))
 
     /** Exposure gain for video, live metering and source-adjustment previews. */
     fun grade(meteredEv: Float): FloatArray {
@@ -174,6 +178,7 @@ data class Look(
         .put("whites", whites.toDouble()).put("blacks", blacks.toDouble())
         .put("vibrance", vibrance.toDouble()).put("saturation", saturation.toDouble())
         .put("lensShading", lensShading).put("aspect", aspect)
+        .put("creative", creative.toJson())
         .put("film", film).put("format", format).put("scan", scan)
         .put("whitePoint", whitePoint?.id ?: "legacy")
         .put("edge", edge.toJson()).put("date", date.toJson()).put("halation", halation.toDouble()).put("grain", grain.toDouble())
@@ -234,6 +239,7 @@ data class Look(
                 vibrance = f("vibrance", 0f, -100f, 100f), saturation = f("saturation", 0f, -100f, 100f),
                 lensShading = o.optBoolean("lensShading", true),
                 aspect = Aspects.valid(o.optString("aspect")),
+                creative = CreativeLook.fromJson(o.optJSONObject("creative")),
                 film = film,
                 format = Format.of(o.optString("format")).id,
                 scan = o.optBoolean("scan", false),

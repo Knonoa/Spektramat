@@ -88,7 +88,19 @@ class Monitor(context: Context, private val library: Library, private val scope:
     /** The same projects shown by the darkroom library, not a second list. */
     val projects get() = library.rolls
     var projectId by mutableStateOf(prefs.getLong("project", -1L).takeIf { it > 0L }); private set
-    var recentShots by mutableStateOf<List<Frame>>(emptyList()); private set
+    val recentShots: List<Frame> get() = library.rolls.value.firstOrNull { it.id == projectId }?.frames.orEmpty()
+        .asReversed().filter { it.tethered }.take(12)
+    var autoReconnect by mutableStateOf(prefs.getBoolean("autoReconnect", true)); private set
+    private var reconnect: Job? = null
+    private var retryCount = 0
+
+    fun autoReconnect(on: Boolean) {
+        autoReconnect = on
+        prefs.edit().putBoolean("autoReconnect", on).apply()
+        if (!on) reconnect?.cancel()
+    }
+
+    suspend fun pick(frameId: Long, picked: Boolean) = library.setPicked(listOf(frameId), picked)
 
     fun selectProject(id: Long) {
         if (library.rolls.value.none { it.id == id }) return
@@ -155,7 +167,6 @@ class Monitor(context: Context, private val library: Library, private val scope:
                     if (connected || busy) notice = "归档项目已移除，请选择新的项目。正在接收的原片会保留。"
                 }
                 val frames = projects.flatMap { it.frames }.associateBy { it.id }
-                recentShots = recentShots.mapNotNull { frames[it.id] }
                 lastShot = lastShot?.let { frames[it.id] }
             }
         }
@@ -176,6 +187,12 @@ class Monitor(context: Context, private val library: Library, private val scope:
 
     fun connect(device: TetherDevice) {
         if (task?.isActive == true || busy) return
+        reconnect?.cancel()
+        retryCount = 0
+        connectSelected(device)
+    }
+
+    private fun connectSelected(device: TetherDevice) {
         if (library.rolls.value.none { it.id == projectId }) {
             notice = "先选一个项目，原片会直接归入这个项目。"
             return
@@ -199,7 +216,9 @@ class Monitor(context: Context, private val library: Library, private val scope:
     }
 
     fun disconnect() {
+        reconnect?.cancel()
         stopping = true
+        wantRelease = false
         asked = null
         wantRecording = false
         if (task?.isActive != true) {
@@ -266,6 +285,8 @@ class Monitor(context: Context, private val library: Library, private val scope:
             var lastSecond = SystemClock.elapsedRealtime()
             var count = 0
             var missingSince = 0L
+            var failed = false
+            var connectedAt = 0L
 
             fun endRecording() {
                 val r = recorder
@@ -304,6 +325,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
                 status = "${camera.model}，已连接"
                 if (camera.setupNote.isNotEmpty()) notice = camera.setupNote
                 connected = true
+                connectedAt = SystemClock.elapsedRealtime()
                 busy = false
 
                 while (!stopping) {
@@ -396,6 +418,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                failed = true
                 Journal.w(TAG, "tether stopped", e)
                 status = "连接断了：${e.message ?: "USB 出错"}"
             } finally {
@@ -404,7 +427,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
                 } catch (e: Exception) {
                     notice = "录像没有存好：${e.message}"
                 }
-                camera?.finish()
+                runCatching { camera?.finish() }.onFailure { Journal.w(TAG, "camera close failed", it) }
                 connected = false
                 busy = false
                 recording = false
@@ -415,14 +438,36 @@ class Monitor(context: Context, private val library: Library, private val scope:
                 stale = picture != null
                 readings = Readings()
                 if (stopping) status = "已断开"
+                if (failed && !stopping && device.usb != null) withContext(Dispatchers.Main) {
+                    if (connectedAt > 0 && SystemClock.elapsedRealtime() - connectedAt > 20_000) retryCount = 0
+                    reconnectAttached(device.usb)
+                }
             }
+        }
+    }
+
+    // Never switch cameras or fire an old shutter request when restoring a session.
+    private fun reconnectAttached(previous: UsbDevice) {
+        if (stopping || !autoReconnect || projectId == null || retryCount >= 2) return
+        val stillAttached = usb.deviceList[previous.deviceName]?.takeIf { it.deviceId == previous.deviceId } ?: return
+        if (!usb.hasPermission(stillAttached)) return
+        retryCount++
+        wantRelease = false
+        status = "连接中断，正在准备重连（$retryCount/2）"
+        reconnect = scope.launch {
+            delay(1500L * retryCount)
+            val device = usb.deviceList[previous.deviceName]?.takeIf { it.deviceId == previous.deviceId }
+            if (!stopping && autoReconnect && !busy && task?.isActive != true && device != null && usb.hasPermission(device))
+                connectSelected(TetherDevice(devices.firstOrNull { it.usb?.deviceId == device.deviceId }?.name ?: "Sony", device))
+            else if (!connected && !stopping && !busy) status = "连接已断开，请重新连接相机"
         }
     }
 
     private fun open(device: TetherDevice): TetherCamera {
         val u = device.usb
         if (u != null) return SonyCamera(PtpSession(UsbPtpLink(usb, u)), device.name)
-        val any = library.rolls.value.firstNotNullOfOrNull { roll -> roll.frames.firstOrNull { !it.raw } }
+        val any = library.rolls.value.firstOrNull { it.id == projectId }?.frames?.firstOrNull { !it.raw }
+            ?: library.rolls.value.firstNotNullOfOrNull { roll -> roll.frames.firstOrNull { !it.raw } }
             ?: throw IOException("演示相机要用片库里的一张照片当画面，先导入一张 JPEG。")
         return DemoCamera(any.file)
     }
@@ -477,7 +522,7 @@ class Monitor(context: Context, private val library: Library, private val scope:
         val wantedProject = project ?: savedProject ?: projectId
         val destination = wantedProject?.takeIf { id -> library.rolls.value.any { it.id == id } } ?: library.tetherRoll()
         val captureLook = capturedLook ?: runCatching { Look.fromJson(lookFile.readText()) }.getOrElse { look }
-        val frame = library.addCapture(whole, name, captureLook, metered = if (raw) null else 0f, roll = destination, keepOnFailure = true)
+        val frame = library.addCapture(whole, name, captureLook, metered = if (raw) null else 0f, roll = destination, keepOnFailure = true, tethered = true)
         if (frame == null) {
             // the library cannot read it, but it is a photograph someone took: it is handed over, never dropped
             copy?.delete()
@@ -500,7 +545,6 @@ class Monitor(context: Context, private val library: Library, private val scope:
         // A project may have been removed while its last transfer was being
         // filed. Only live catalogue entries can become shortcuts to the bench.
         lastShot = library.frame(frame.id)
-        recentShots = (listOfNotNull(lastShot) + recentShots).distinctBy { it.id }.take(12)
         if (copy != null) {
             try {
                 savePublic(copy, name)

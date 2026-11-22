@@ -69,7 +69,6 @@ import com.spektra.latent.data.PrintJob
 import com.spektra.latent.data.PrintFormat
 import com.spektra.latent.data.Printed
 import com.spektra.latent.engine.FilmEngine
-import kotlinx.coroutines.delay
 import kotlin.math.PI
 import kotlin.math.floor
 import kotlin.math.min
@@ -96,33 +95,24 @@ import kotlin.math.sin
 @Composable
 fun PrintOverlay(desk: PrintDesk, activeFrame:Long?=null) {
     val jobs = desk.jobs
-    val job = jobs.firstOrNull { it.state is PrintJob.State.Working }
-        ?: jobs.firstOrNull { it.state is PrintJob.State.Waiting }
-        ?: jobs.lastOrNull()
+    val job = jobs.firstOrNull { !it.badgeHidden && it.state is PrintJob.State.Working }
+        ?: jobs.firstOrNull { !it.badgeHidden && it.state is PrintJob.State.Waiting }
+        ?: jobs.lastOrNull { !it.badgeHidden && !it.stopped }
     var opened by remember { mutableStateOf<Long?>(null) }
     val open = job != null && opened == job.id
     val state = job?.state
-
-    // a finished print leaves by itself, unless it is being looked at
     val presenting = job != null && (job.animation.awaitingWorkbench ||
         (activeFrame == job.frame.id && !job.animation.acknowledged))
-    LaunchedEffect(job?.id, state is PrintJob.State.Done, open, presenting) {
+    LaunchedEffect(job?.id, state, open, presenting) {
         if (job != null && state is PrintJob.State.Done && !open && !presenting) {
-            delay(5000)
-            desk.dismiss(job)
+            kotlinx.coroutines.delay(5000)
+            job.badgeHidden = true
         }
-    }
-    // finished prints that are not the one shown are already in the gallery: nothing more to say about them
-    val passed = jobs.count { it !== job && it.state is PrintJob.State.Done &&
-        !it.animation.awaitingWorkbench && (it.frame.id != activeFrame || it.animation.acknowledged) }
-    LaunchedEffect(passed) {
-        if (passed > 0) jobs.filter { it !== job && it.state is PrintJob.State.Done &&
-            !it.animation.awaitingWorkbench && (it.frame.id != activeFrame || it.animation.acknowledged) }.forEach(desk::dismiss)
     }
 
     Box(Modifier.fillMaxSize()) {
         AnimatedVisibility(
-            visible = job != null && (activeFrame != job.frame.id || job.state is PrintJob.State.Failed || job.state is PrintJob.State.Done),
+            visible = job != null && (job.cameraCapture || activeFrame != job.frame.id || job.state is PrintJob.State.Failed || job.state is PrintJob.State.Done),
             modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 70.dp, end = 4.dp),
             enter = fadeIn(tween(120)) + scaleIn(spring(0.6f, 520f), initialScale = 0.4f, transformOrigin = TransformOrigin(1f, 0f)),
             exit = fadeOut(tween(200)) + scaleOut(tween(200), targetScale = 0.6f, transformOrigin = TransformOrigin(1f, 0f)),
@@ -351,6 +341,7 @@ private fun Details(job: PrintJob) {
                 else "已经存进相册的 ${APP_NAME} 相簿。"
             } else "成片已保存在应用内，可通过分享另存；本次未能写入系统相册。"
             Txt(location, Type.label, color = Ink.GlassDim, maxLines = 3)
+            state.printed.highlightReport?.let { Txt(it.label(job.format), Type.micro, color = Ink.GlassDim) }
         }
         is PrintJob.State.Failed -> {
             Txt(state.reason, Type.body, color = Ink.GlassDim, maxLines = 6)
@@ -401,9 +392,12 @@ private fun RowScope.DetailsFoot(job: PrintJob, desk: PrintDesk, close: () -> Un
                     ),
                 )
             }, Modifier.weight(1f), icon = Glyph.Share)
-            Btn("好", { close(); desk.dismiss(job) }, Modifier.weight(1f), BtnKind.Key)
+            Btn("好", { close(); job.badgeHidden = true }, Modifier.weight(1f), BtnKind.Key)
         }
-        is PrintJob.State.Failed -> Btn("知道了", { close(); desk.dismiss(job) }, Modifier.weight(1f))
+        is PrintJob.State.Failed -> {
+            if (desk.canRetry(job)) Btn("重试", { close(); desk.retry(job) }, Modifier.weight(1f), BtnKind.Key)
+            Btn("收起", { close(); job.badgeHidden = true }, Modifier.weight(1f))
+        }
         else -> {
             Btn("停止冲印", { close(); desk.stop(job) }, Modifier.weight(1f), BtnKind.Danger)
             Btn("收起", close, Modifier.weight(1f))

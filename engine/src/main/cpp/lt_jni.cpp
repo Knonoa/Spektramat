@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "basic_adjust.hpp"
+#include "creative_effects.hpp"
 #include "color_spaces.hpp"
 #include "engine_image.hpp"
 #include "lt_fast.hpp"
@@ -407,6 +408,29 @@ NATIVE(jlong, newFloatImage)(JNIEnv* env, jobject, jint width, jint height) {
     }
 }
 
+NATIVE(jlong, creativeOptics)(JNIEnv* env, jobject, jlong id, jfloat soft, jfloat flare, jfloat glow) {
+    auto src = image(id);
+    if (!src) { throw_io(env, "picture released"); return 0; }
+    try {
+        return publish(std::make_shared<LinearImage>(spk::creative::optics(*src, soft, flare, glow)));
+    } catch (const std::exception& e) { throw_io(env, e.what()); return 0; }
+}
+
+NATIVE(void, accumulateExposure)(JNIEnv* env, jobject, jlong targetId, jlong layerId, jobject weightBuffer, jfloat weight,
+    jfloat x, jfloat y, jfloat scale, jfloat rotation, jboolean gradient, jfloat angle, jfloat midpoint, jfloat feather) {
+    auto target = image(targetId), layer = image(layerId);
+    if (!target || !layer) { throw_io(env, "picture released"); return; }
+    void* data = env->GetDirectBufferAddress(weightBuffer);
+    const jlong bytes = env->GetDirectBufferCapacity(weightBuffer);
+    if (!data || bytes != jlong(target->width) * target->height * jlong(sizeof(float))) {
+        throw_io(env, "invalid exposure weights"); return;
+    }
+    try {
+        spk::creative::accumulate(*target, *layer, static_cast<float*>(data), size_t(bytes / sizeof(float)), weight,
+            {x, y, scale, rotation, gradient == JNI_TRUE, angle, midpoint, feather});
+    } catch (const std::exception& e) { throw_io(env, e.what()); }
+}
+
 // A persistent proxy must carry the RAW fallback warning across process death.
 NATIVE(jlong, newProxyImage)(JNIEnv* env, jobject, jint width, jint height, jboolean previewOnly, jint lensOpcodes) {
     if (width <= 0 || height <= 0 || (uint64_t)width * height > 4096ull * 4096 || lensOpcodes < 0) {
@@ -451,6 +475,60 @@ NATIVE(jlong, scaledPhoto)(JNIEnv* env, jobject, jlong id, jint maxEdge, jstring
         auto out = std::make_shared<LinearImage>(spk::android_io::scaled_linear(linear, maxEdge));
         if (encoded == JNI_TRUE)
             for (float& v : out->rgb) v = spk::output_encode(v, name);
+        return publish(std::move(out));
+    } catch (const std::bad_alloc&) { throw_io(env, "out of memory"); }
+      catch (const std::string& e) { throw_io(env, e); }
+    return 0;
+}
+
+// Area sample the requested rectangle directly, so a strip never keeps a second full RAW-sized float buffer.
+NATIVE(jlong, cropScalePhoto)(JNIEnv* env, jobject, jlong id, jint x, jint y, jint w, jint h,
+                             jint dw, jint dh, jstring space, jboolean encoded) {
+    auto src = image(id);
+    if (!src || x < 0 || y < 0 || w <= 0 || h <= 0 || x > src->width - w || y > src->height - h ||
+        dw <= 0 || dh <= 0 || (int64_t)dw * dh > 8000000) {
+        throw_io(env, "invalid print crop");
+        return 0;
+    }
+    try {
+        const auto name = str(env, space);
+        spk::output_color_space(name);
+        auto out = std::make_shared<LinearImage>();
+        out->width = dw;
+        out->height = dh;
+        out->rgb.resize((size_t)dw * dh * 3);
+        const double sx = (double)w / dw, sy = (double)h / dh;
+        spk::parallel_for(dh, [&](int begin, int end) {
+            for (int row = begin; row < end; ++row) {
+                const double top = row * sy, bottom = (row + 1) * sy;
+                const int y0 = (int)top, y1 = std::min(h, (int)std::ceil(bottom));
+                for (int col = 0; col < dw; ++col) {
+                    const double left = col * sx, right = (col + 1) * sx;
+                    const int x0 = (int)left, x1 = std::min(w, (int)std::ceil(right));
+                    float* dest = out->rgb.data() + ((size_t)row * dw + col) * 3;
+                    if (x1 == x0 + 1 && y1 == y0 + 1) {
+                        const float* p = src->rgb.data() + ((size_t)(y + y0) * src->width + x + x0) * 3;
+                        std::memcpy(dest, p, 3 * sizeof(float));
+                        continue;
+                    }
+                    double sum[3]{};
+                    double weight = 0;
+                    for (int j = y0; j < y1; ++j) {
+                        const double wy = std::min(bottom, j + 1.0) - std::max(top, (double)j);
+                        for (int i = x0; i < x1; ++i) {
+                            const double wt = wy * (std::min(right, i + 1.0) - std::max(left, (double)i));
+                            const float* p = src->rgb.data() + ((size_t)(y + j) * src->width + x + i) * 3;
+                            for (int c = 0; c < 3; ++c) sum[c] += wt * (encoded ? spk::output_decode(p[c], name) : p[c]);
+                            weight += wt;
+                        }
+                    }
+                    for (int c = 0; c < 3; ++c) {
+                        const float value = (float)(sum[c] / weight);
+                        dest[c] = encoded ? spk::output_encode(value, name) : value;
+                    }
+                }
+            }
+        });
         return publish(std::move(out));
     } catch (const std::bad_alloc&) { throw_io(env, "out of memory"); }
       catch (const std::string& e) { throw_io(env, e); }
@@ -721,6 +799,9 @@ NATIVE(jstring, renderFast)(JNIEnv* env, jobject, jlong imageId, jlong tablesId,
     return error.empty() ? nullptr : jstr(env, error);
 }
 
+NATIVE(void, limitExportWorkers)(JNIEnv*, jobject, jint count) {
+    spk::export_worker_limit.store(count, std::memory_order_relaxed);
+}
 NATIVE(void, cancelDevelop)(JNIEnv*, jobject) { g_develop_cancel.store(true); }
 NATIVE(void, cancelProof)(JNIEnv*, jobject) { g_proof_cancel.store(true); }
 

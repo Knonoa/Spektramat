@@ -12,15 +12,20 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import com.spektra.latent.LatentApp
 import com.spektra.latent.data.Frame
+import com.spektra.latent.data.HighlightCheck
+import com.spektra.latent.data.HighlightReport
+import com.spektra.latent.data.PrintFormat
 import com.spektra.latent.data.Library
 import com.spektra.latent.data.PhotoProxyStore
 import com.spektra.latent.data.PhotoLutCache
+import com.spektra.latent.data.CreativeSource
 import com.spektra.latent.engine.DevelopCancelled
 import com.spektra.latent.engine.FilmEngine
 import com.spektra.latent.engine.LinearImage
 import com.spektra.latent.gl.Placement
 import com.spektra.latent.gl.PhotoPreviewRenderer
 import com.spektra.latent.model.Look
+import com.spektra.latent.model.CreativeLook
 import com.spektra.latent.model.Shooting
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -33,6 +38,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * One photograph on the bench: its look while it is being worked on, the undo
@@ -96,6 +103,20 @@ class DarkroomState(
     /** The engine's small print, including the film edge and date when requested. */
     var proof by mutableStateOf<ImageBitmap?>(null)
         private set
+    var highlights by mutableStateOf<HighlightReport?>(null)
+        private set
+    var highlightOverlay by mutableStateOf<ImageBitmap?>(null)
+        private set
+    private var warningFormat: PrintFormat? = null
+
+    fun setHighlightWarning(format: PrintFormat?) {
+        if (warningFormat == format) return
+        warningFormat = format
+        highlights = null
+        highlightOverlay = null
+        if (format != null) requestExact()
+    }
+
     var proofGate by mutableStateOf(floatArrayOf(0f,0f,1f,0f,1f,1f,0f,1f))
         private set
     var proofSourceQuad by mutableStateOf(PhotoComparison.identity())
@@ -120,10 +141,15 @@ class DarkroomState(
     private val sourceLock = Any()
     @Volatile private var loadedSource: SourceKey? = null
     private var proofSource: LinearImage? = null
+    private data class CreativeKey(val source: String, val creative: CreativeLook)
+    private val creativeLock = Mutex()
+    private var creativeKey: CreativeKey? = null
+    private var creativeSource: LinearImage? = null
     @Volatile private var loadGeneration = 0L
     private var proofJob: Job? = null
     // declared before init: the collector started there reads it at once
-    private data class Want(val look: Look, val sharp: Boolean, val adjustmentsOnly: Boolean)
+    private data class Want(val look: Look, val sharp: Boolean, val adjustmentsOnly: Boolean, val viewRevision: Long)
+    private var viewRevision = 0L
     private val wants = MutableStateFlow<Want?>(null)
     @Volatile private var disposed = false
 
@@ -157,6 +183,9 @@ class DarkroomState(
                             small.close()
                         } else {
                             proofSource?.close()
+                            creativeSource?.close()
+                            creativeSource = null
+                            creativeKey = null
                             proofSource = small
                             sourceIdentity = "${frame.file.path}:${frame.file.length()}:${frame.file.lastModified()}:$key:$generation"
                             loadedSource = key
@@ -179,9 +208,12 @@ class DarkroomState(
     fun showAdjustmentsOnly(on: Boolean) {
         if (on == adjustmentsOnly) return
         adjustmentsOnly = on
+        viewRevision++
         comparing = false
         // Do not display a stale film result in the adjustment workspace.
         proof = null
+        highlights = null
+        highlightOverlay = null
         ready = false
         proofGate = WHOLE_GATE.copyOf()
         proofSourceQuad = PhotoComparison.identity()
@@ -271,6 +303,18 @@ class DarkroomState(
         show()
     }
 
+    fun transformLayer(id: String, dx: Float, dy: Float, zoom: Float, rotation: Float) {
+        val current = look
+        val creative = current.creative
+        change(current.copy(creative = creative.copy(layers = creative.layers.map { layer ->
+            if (id != layer.id) layer else {
+                val p = layer.placement
+                layer.copy(placement = p.copy(x = (p.x + dx).coerceIn(-1f, 1f), y = (p.y + dy).coerceIn(-1f, 1f),
+                    scale = (p.scale * zoom).coerceIn(.25f, 3f), rotation = ((p.rotation + rotation + 540f) % 360f) - 180f))
+            }
+        })))
+    }
+
     fun fit() {
         placement = Placement()
         show()
@@ -317,7 +361,7 @@ class DarkroomState(
         picking = pickingStocks; busy = exporting
         exactJob?.cancel()
         FilmEngine.cancelProof()
-        if (!picking && !busy && look == settled && !adjustmentsOnly) scheduleExact(Want(look, true, false))
+        if ((!picking || warningFormat != null) && !busy && look == settled && !adjustmentsOnly) scheduleExact(Want(look, true, false, viewRevision))
     }
 
     // ---- the proof
@@ -330,10 +374,12 @@ class DarkroomState(
         // Every darkroom frame is a photo render, including a plain frame
         // without film edge/date. The previous exact proof stays visible while
         // the latest look is rendered.
-        val want = Want(l, l == settled, adjustmentsOnly)
+        val want = Want(l, l == settled, adjustmentsOnly, viewRevision)
         if (wants.value == want) return
         proofing = true
         exact = false
+        highlights = null
+        highlightOverlay = null
         exactJob?.cancel()
         // Stop the previous render before publishing its replacement. Publishing
         // first could let the worker start the new render and cancel that one.
@@ -370,10 +416,11 @@ class DarkroomState(
                 PhotoLutCache.ready(order, PhotoLutCache.WORK_SIZE)
                     ?: PhotoLutCache.get(app, order, PhotoLutCache.SAMPLE_SIZE)
             currentCoroutineContext().ensureActive()
-            val bitmap = synchronized(sourceLock) {
-                val source = proofSource?.takeIf { loadedSource == key } ?: return
-                // One persistent RGB32F upload; slider events allocate only the small display result.
-                renderer.render(source, sourceIdentity, l, cube,
+            val identity = synchronized(sourceLock) { sourceIdentity }
+            val source = inputFor(l, key, if (want.sharp) PROOF_EDGE else DRAFT_EDGE, want.adjustmentsOnly) ?: return
+            val bitmap = source.use {
+                // Scene sliders reuse the same composed float proxy and GPU upload.
+                renderer.render(it, "$identity:${if (want.adjustmentsOnly) "original" else l.creative}:${it.width}x${it.height}", l, cube,
                     want.adjustmentsOnly, if (want.sharp) PROOF_EDGE else DRAFT_EDGE)
             }
             val image = bitmap.asImageBitmap()
@@ -408,44 +455,90 @@ class DarkroomState(
     }
 
     fun requestExact() {
-        if (!busy && !adjustmentsOnly) scheduleExact(Want(look, look == settled, false), force = true)
+        if (!busy && !adjustmentsOnly) scheduleExact(Want(look, look == settled, false, viewRevision), force = true)
     }
 
     private fun scheduleExact(want: Want, force: Boolean = false) {
         if (disposed || wants.value != want) return
         exactJob?.cancel()
-        if ((!force && picking) || busy || disposed) return
+        val checkFormat = warningFormat
+        if ((!force && picking && checkFormat == null) || busy || disposed) return
         exactJob = scope.launch(Dispatchers.Default) {
             try {
                 delay(650)
-                if (disposed || wants.value != want || (!force && picking) || busy) return@launch
+                if (disposed || wants.value != want || (!force && picking && checkFormat == null) || busy) return@launch
                 val l = want.look
                 val key = SourceKey(l.aspect, l.lensShading)
                 // Refine the cube once per conversion. Ordinary scene adjustments reuse it.
                 PhotoLutCache.get(app, l.photoOrder(0L), PhotoLutCache.WORK_SIZE, interactive = false)
                 currentCoroutineContext().ensureActive()
-                val source = synchronized(sourceLock) {
-                    if (loadedSource == key) proofSource?.scaled(EXACT_EDGE) else null
-                } ?: return@launch
+                val source = inputFor(l, key, EXACT_EDGE, false) ?: return@launch
                 val gate = rebate(l).pictureGate(source.width, source.height)
                 val quad = rebate(l).pictureSource(source.width, source.height)
                 val dates = rebate(l).dateBounds(source.width, source.height, l.formatUm / 1000f)
+                val renderContext = currentCoroutineContext()
+                var inspection: com.spektra.latent.data.HighlightMask? = null
                 val bitmap = source.use { copy ->
-                    FilmEngine.develop(copy, l.photoGrade(),
-                        l.photoOrder(frame.id * 7919L + 1L, shooting, Library.frameSeed(frame), frame.number),
+                    val order = l.photoOrder(frame.id * 7919L + 1L, shooting, Library.frameSeed(frame), frame.number)
+                    if (checkFormat == null) FilmEngine.develop(copy, l.photoGrade(), order,
                         l.finish(), l.finishTable(), lane = FilmEngine.PROOF)
+                    else FilmEngine.proofFloat(copy, l.photoGrade(), order, l.finish(), l.finishTable()).use { pixels ->
+                        val preview = pixels.display(0)
+                        try {
+                            inspection = HighlightCheck.inspect(pixels, checkFormat, gate, dates, drawMask = true) { renderContext.ensureActive() }
+                            preview
+                        } catch (e: Throwable) { preview.recycle(); throw e }
+                    }
                 }
-                if (!currentCoroutineContext().isActive) { bitmap.recycle(); return@launch }
+                if (!renderContext.isActive) { bitmap.recycle(); inspection?.overlay?.recycle(); return@launch }
                 main.post {
-                    if (!disposed && wants.value == want && loadedSource == key && (force || !picking) && !busy) {
+                    if (!disposed && wants.value == want && loadedSource == key && (force || !picking || checkFormat != null) && !busy) {
                         proof = bitmap.asImageBitmap(); proofGate = gate; proofSourceQuad = quad
                         proofDateBounds = dates; exact = true; placement = clamp(placement)
-                    } else bitmap.recycle()
+                        if (warningFormat == checkFormat) {
+                            highlights = inspection?.report
+                            highlightOverlay = inspection?.overlay?.asImageBitmap()
+                        } else inspection?.overlay?.recycle()
+                    } else { bitmap.recycle(); inspection?.overlay?.recycle() }
                 }
             } catch (_: DevelopCancelled) {
             } catch (e: CancellationException) { throw e
             } catch (e: Exception) { Journal.w(TAG, "exact proof deferred; GPU proxy remains available", e)
             } catch (_: OutOfMemoryError) { /* keep the inexpensive proxy */ }
+        }
+    }
+
+    /** Keeps creative compositing independent of ordinary scene/film slider changes. */
+    private suspend fun inputFor(l: Look, key: SourceKey, edge: Int, originalOnly: Boolean): LinearImage? {
+        if (originalOnly || !l.creative.active) return synchronized(sourceLock) {
+            if (loadedSource == key) proofSource?.scaled(edge) else null
+        }
+        return creativeLock.withLock {
+            val identity = synchronized(sourceLock) { sourceIdentity }
+            val wanted = CreativeKey(identity, l.creative)
+            val cached = synchronized(sourceLock) {
+                val required = minOf(edge, proofSource?.let { maxOf(it.width, it.height) } ?: edge)
+                if (loadedSource == key && creativeKey == wanted &&
+                    (creativeSource?.let { maxOf(it.width, it.height) } ?: 0) >= required)
+                    creativeSource?.scaled(edge) else null
+            }
+            if (cached != null) return@withLock cached
+            val base = synchronized(sourceLock) {
+                if (loadedSource == key) proofSource?.scaled(edge) else null
+            } ?: return@withLock null
+            var prepared: LinearImage? = null
+            try {
+                prepared = base.use { CreativeSource(app).apply(it, l, edge) }
+                currentCoroutineContext().ensureActive()
+                synchronized(sourceLock) {
+                    if (disposed || loadedSource != key || sourceIdentity != identity) return@synchronized null
+                    creativeSource?.close()
+                    creativeSource = prepared
+                    creativeKey = wanted
+                    prepared = null
+                    creativeSource?.scaled(edge)
+                }
+            } finally { prepared?.close() }
         }
     }
 
@@ -464,8 +557,12 @@ class DarkroomState(
         // the proof loop may still hold it for a moment: it is closed once that loop has ended
         app.scope.launch(Dispatchers.Default) {
             proofJob?.join()
+            exactJob?.join()
             synchronized(sourceLock) {
                 proofSource?.close()
+                creativeSource?.close()
+                creativeSource = null
+                creativeKey = null
                 proofSource = null
                 loadedSource = null
             }

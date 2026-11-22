@@ -23,7 +23,10 @@ import java.io.IOException
 import kotlin.math.roundToInt
 
 /** A finished print: where it was saved, and a screen-sized copy to show. */
-class Printed(val uri: Uri, val width: Int, val height: Int, val shown: Bitmap, val inGallery: Boolean)
+class Printed(val uri: Uri, val width: Int, val height: Int, internal val preview: Bitmap?, val inGallery: Boolean,
+              val highlightReport: HighlightReport? = null, val location: String? = null) {
+    val shown: Bitmap get() = checkNotNull(preview)
+}
 
 /**
  * Makes the finished print of a frame: the original is read again at the
@@ -49,6 +52,9 @@ object Printer {
         longEdge: Int,
         format: PrintFormat = PrintFormat.JPEG,
         shouldStop: () -> Boolean = { false },
+        checkHighlights: Boolean = false,
+        previewEdge: Int = 1600,
+        outputKey: String? = null,
         onStage: (Int) -> Unit,
     ): Printed = withContext(Dispatchers.IO) {
         PrintStorage.renderGate.withLock {
@@ -58,20 +64,31 @@ object Printer {
             onStage(0)
             val shooting = if (look.edge.on || look.date.on) Shooting.of(frame) else null
             val nativeFrameEdge = look.frameSize(frame.width, frame.height).max()
-            val print = Decoder.decode(frame.file, 0, look.lensShading, look.aspect).use { original ->
+            val decoded = Decoder.decode(frame.file, 0, look.lensShading, look.aspect)
+            val prepared = if (look.creative.active) {
+                decoded.use { CreativeSource(context).apply(it, look, 0) }
+            } else decoded
+            val order = look.photoOrder(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number)
+            var gate = floatArrayOf()
+            var dates = floatArrayOf()
+            val print = prepared.use { original ->
                 if (stopRequested()) throw DevelopCancelled()
+                if (checkHighlights) {
+                    gate = order.rebate.pictureGate(original.width, original.height)
+                    dates = order.rebate.dateBounds(original.width, original.height, look.formatUm / 1000f)
+                }
                 // the engine's grain and halation are sized on the film: the same frame, whatever the print's size
-                synchronized(cancellationGuard) { renderingOriginal = true }
-                try {
+                withNativeCancellation {
+                    if (stopRequested()) throw DevelopCancelled()
                     FilmEngine.developFloat(
                         original, look.photoGrade(),
-                        look.photoOrder(seed = frame.id * 7919L + 1L, shooting = shooting, frameSeed = Library.frameSeed(frame), number = frame.number),
+                        order,
                         look.finish(), look.finishTable(),
                         object : StageListener {
                             override fun onStage(stage: Int) = onStage(stage)
                         },
                     )
-                } finally { synchronized(cancellationGuard) { renderingOriginal = false } }
+                }
             }
             try {
                 // Cancellation can arrive during decoding, before the native
@@ -83,33 +100,47 @@ object Printer {
                 val resized = if (target > 0) print.scaled(target) else null
                 try {
                     val output = resized ?: print
+                    val report = if (checkHighlights) HighlightCheck.inspect(output, format, gate, dates, drawMask = false) {
+                        if (stopRequested()) throw DevelopCancelled()
+                    }.report else null
                     val name = fileName(frame, look, format)
                     // save() also carries the shooting data while it still owns the
                     // row / the file; a published gallery row may refuse "rw" on
                     // some phones.
                     // Allocate the display before committing a file, so display OOM cannot make a
                     // successful save appear to have failed. A small thumbnail is an acceptable fallback.
-                    val shown = try { output.display() } catch (_: OutOfMemoryError) { output.display(320) }
+                    val shown = try { output.display(previewEdge) } catch (_: OutOfMemoryError) { output.display(320) }
                     var delivered = false
                     try {
-                        val saved = save(context, output, name, format, frame.file, ::stopRequested)
-                        withContext(NonCancellable) {
-                            try {
-                                val registered = library.addPrint(frame.id, saved.uri.toString(), output.width, output.height, look.film)
-                                if (registered == -1L) Journal.w(TAG, "print saved; catalogue entry was unavailable")
-                            } catch (failure: Exception) {
-                                Journal.w(TAG, "print saved; catalogue registration failed", failure)
-                            }
-                        }
+                        val token = outputKey?.let { PrintStorage.Output(it, output.width, output.height, report) }
+                        val saved = save(context, output, name, format, frame.file, ::stopRequested, token)
+                        val printed = Printed(saved.uri, output.width, output.height, shown, saved.inGallery, report, saved.location)
+                        register(library, frame, look, printed)
                         onStage(STAGES)
                         delivered = true
-                        Printed(saved.uri, output.width, output.height, shown, saved.inGallery)
+                        printed
                     } finally { if (!delivered) shown.recycle() }
                 } finally { resized?.close() }
             } finally {
                 print.close()
             }
         }
+    }
+
+    internal suspend fun register(library: Library, frame: Frame, look: Look, printed: Printed) = withContext(NonCancellable) {
+        try {
+            val registered = library.addPrint(frame.id, printed.uri.toString(), printed.width, printed.height, look.film)
+            if (registered == -1L) Journal.w(TAG, "print saved; catalogue entry was unavailable")
+        } catch (failure: Exception) {
+            Journal.w(TAG, "print saved; catalogue registration failed", failure)
+        }
+    }
+
+    /** Called only while the caller owns the original render lane. */
+    internal fun <T> withNativeCancellation(render: () -> T): T {
+        synchronized(cancellationGuard) { renderingOriginal = true }
+        try { return render() }
+        finally { synchronized(cancellationGuard) { renderingOriginal = false } }
     }
 
     // A print waiting for renderGate must not cancel a contact-sheet export
@@ -130,9 +161,10 @@ object Printer {
      * along while this function still owns the bytes.
      */
     private fun save(context: Context, pixels: PhotoPixels, name: String, format: PrintFormat, original: File,
-                     shouldStop: () -> Boolean): SavedPrint = PrintStorage.save(
+                     shouldStop: () -> Boolean, token: PrintStorage.Output?): SavedPrint = PrintStorage.save(
         context, name, format.mime, shouldStop,
         metadata = { if (format == PrintFormat.JPEG) copyExif(original, it) },
+        output = token,
     ) { output ->
         when (format) {
             PrintFormat.PNG -> PhotoPng.write(context, pixels, output, shouldStop)

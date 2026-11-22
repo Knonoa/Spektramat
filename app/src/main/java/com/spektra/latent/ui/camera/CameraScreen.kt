@@ -169,7 +169,7 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onOpen: 
     val haptic = LocalHapticFeedback.current
     val shell = LocalShell.current
     val overlays = LocalOverlays.current
-    val rig = remember { CameraRig(context, library, app.scope) }
+    val rig = remember { CameraRig(context, library, prints, app.scope) }
     val rolls by library.rolls.collectAsStateWithLifecycle()
     val lastShot = rig.lastShot?.let { shot -> rolls.firstNotNullOfOrNull { roll -> roll.frames.firstOrNull { it.id == shot.id } } }
 
@@ -180,7 +180,12 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onOpen: 
         refused = !it
     }
     val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-    LaunchedEffect(Unit) { if (!allowed) askCamera.launch(Manifest.permission.CAMERA) }
+    val askLegacyStorage = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(allowed) {
+        if (!allowed) askCamera.launch(Manifest.permission.CAMERA)
+        else if (android.os.Build.VERSION.SDK_INT <= 28 && !holds(context, Manifest.permission.WRITE_EXTERNAL_STORAGE))
+            askLegacyStorage.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+    }
 
     val finder = remember {
         PreviewView(context).apply {
@@ -225,13 +230,6 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onOpen: 
     val facts = rig.facts
     val dials = facts?.let { dialsOf(it) }.orEmpty()
 
-    // a print of every photograph as soon as it is filed, when the person has asked for that
-    DisposableEffect(rig) {
-        rig.onFiled = { frame ->
-            if (rig.printOnRelease) prints.order(frame, frame.look, context.getSharedPreferences("appearance", 0).getInt("exportEdge", 0))
-        }
-        onDispose { rig.onFiled = null }
-    }
     // the phone's own camera app, for lenses the phone keeps to itself: its picture comes back here whole
     var handover by remember { mutableStateOf<File?>(null) }
     val systemCamera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { taken ->
@@ -500,7 +498,7 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onOpen: 
                             Box(
                                 Modifier.size(52.dp).border(2.dp, Ink.Paper)
                                     .clickable(remember { MutableInteractionSource() }, indication = null, enabled = !rig.recordingBusy) { onOpen(shot.id) }
-                                    .semantics { contentDescription = "刚拍的这张，点开去冲印" },
+                                    .semantics { contentDescription = "刚拍的这张，在工作台打开" },
                             ) { FileImage(shot.thumb, Modifier.fillMaxSize().padding(2.dp)) }
                         }
                     }
@@ -543,7 +541,7 @@ fun CameraScreen(library: Library, prints: PrintDesk, recipes: Recipes, onOpen: 
             }
             EdgePanel(host, null, bleed = 20.dp)
             if (facts?.raw == true) Ctl("保存 RAW", note = "片边和日期印在成片上；取景里看不到它们。", trailing = { Toggle(rig.raw, { rig.toggleRaw() }, "保存 RAW") })
-            Ctl("拍下即冲印", note = "每拍一张，原片存进片库，同时在后台按这里的设置冲一张成片存进相册。关着时只存原片。", trailing = { Toggle(rig.printOnRelease, rig::printOnRelease, "拍下即冲印") })
+            Ctl("拍照保存", note = "原片存进片库，成片在后台冲印。冲印期间可以继续拍照。")
             Ctl("系统相机", note = "有的手机把长焦等镜头留给自带的相机。在那里拍，照片完整地回到这里，按同样的设置入库和冲印。") {
                 Btn("打开", { back = false; openSystemCamera() }, size = BtnSize.Small)
             }

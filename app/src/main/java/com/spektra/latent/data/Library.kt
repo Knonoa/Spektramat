@@ -62,6 +62,8 @@ data class Frame(
     /** The thumbnail on disk shows the look as of this revision. */
     val thumb: File,
     val revision: Int,
+    val picked: Boolean = false,
+    val tethered: Boolean = false,
 ) {
     val longEdge: Int get() = max(width, height)
 }
@@ -127,27 +129,29 @@ class Library(context: Context) {
     /** Rebuild old-algorithm previews after the catalogue is available. */
     suspend fun refreshPreviews() = withContext(Dispatchers.IO) {
         val frames = catalogue.withLock { _rolls.value.flatMap { it.frames } }
-        for (frame in frames) {
-            currentCoroutineContext().ensureActive()
-            if (frame.thumb.exists()) continue
-            val pending = File(thumbs, frame.thumb.name + ".${UUID.randomUUID()}.pending")
-            try {
-                Decoder.decode(frame.file, THUMB_EDGE, frame.look.lensShading, frame.look.aspect).use {
-                    currentCoroutineContext().ensureActive()
-                    renderThumb(it, frame.look, pending, rebateOf(frame, frame.look))
-                }
-                catalogue.withLock {
-                    if (this@Library.frame(frame.id)?.revision == frame.revision && !frame.thumb.exists()) {
-                        if (!pending.renameTo(frame.thumb)) throw IOException("thumbnail could not be published")
-                    }
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (e: Exception) {
-                Journal.w(TAG, "thumbnail migration failed for ${frame.name}", e)
-            } finally {
-                pending.delete()
+        for (frame in frames) ensureThumbnail(frame)
+    }
+
+    internal suspend fun ensureThumbnail(frame: Frame) = withContext(Dispatchers.IO) {
+        currentCoroutineContext().ensureActive()
+        if (frame.thumb.exists()) return@withContext
+        val pending = File(thumbs, frame.thumb.name + ".${UUID.randomUUID()}.pending")
+        try {
+            Decoder.decode(frame.file, THUMB_EDGE, frame.look.lensShading, frame.look.aspect).use {
+                currentCoroutineContext().ensureActive()
+                renderThumb(it, frame.look, pending, rebateOf(frame, frame.look))
             }
+            catalogue.withLock {
+                if (this@Library.frame(frame.id)?.revision == frame.revision && !frame.thumb.exists()) {
+                    if (!pending.renameTo(frame.thumb)) throw IOException("thumbnail could not be published")
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            Journal.w(TAG, "thumbnail failed for ${frame.name}", e)
+        } finally {
+            pending.delete()
         }
     }
 
@@ -203,7 +207,7 @@ class Library(context: Context) {
                             (app.contentResolver.openInputStream(uri) ?: throw IOException("打不开这个文件")).use { input ->
                                 original.outputStream().use { input.copyTo(it, 1 shl 16) }
                             }
-                            val size = Decoder.size(original) ?: throw IOException("不是可以读取的图片")
+                            val size = Decoder.probe(original) ?: throw IOException("不是可以读取的图片")
                             val look = Look()
                             val preview = thumbFile(original, 1)
                             thumb = preview
@@ -242,7 +246,8 @@ class Library(context: Context) {
      * its existing exposure; neither import nor rendering meters it again.
      */
     suspend fun addCapture(
-        shot: File, name: String, look: Look, metered: Float?, roll: Long? = null, keepOnFailure: Boolean = false,
+        shot: File, name: String, look: Look, metered: Float?, roll: Long? = null, keepOnFailure: Boolean = false, tethered: Boolean = false,
+        generateThumbnail: Boolean = true,
     ): Frame? = withContext(Dispatchers.IO) {
         catalogue.withLock {
             val copy = File(originals, UUID.randomUUID().toString() + extension(name))
@@ -257,18 +262,20 @@ class Library(context: Context) {
                 }
                 val size = Decoder.size(copy) ?: throw IOException("拍下的文件读不出来")
                 val ev = metered ?: 0f
-                val id = insertFrame(destination ?: cameraRoll(), copy, name, size, ev, look)
+                val id = insertFrame(destination ?: cameraRoll(), copy, name, size, ev, look, tethered)
                 registered = true
                 publish()
                 val filed = frame(id) ?: throw IOException("拍下的照片没有登记上")
                 // the thumbnail needs the frame itself: its number and date go onto the film's edge.
                 // The photograph is filed by now; a thumbnail that fails does not unfile it.
-                try {
-                    Decoder.decode(copy, THUMB_EDGE, look.lensShading, look.aspect).use {
-                        renderThumb(it, look, filed.thumb, rebateOf(filed, look))
+                if (generateThumbnail) {
+                    try {
+                        Decoder.decode(copy, THUMB_EDGE, look.lensShading, look.aspect).use {
+                            renderThumb(it, look, filed.thumb, rebateOf(filed, look))
+                        }
+                    } catch (e: Exception) {
+                        Journal.w(TAG, "no thumbnail for $name", e)
                     }
-                } catch (e: Exception) {
-                    Journal.w(TAG, "no thumbnail for $name", e)
                 }
                 return@withLock filed
             } catch (e: Exception) {
@@ -287,6 +294,19 @@ class Library(context: Context) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 null
             }
+        }
+    }
+
+    /** Selection is project metadata; it must not invalidate an image or its cached thumbnail. */
+    suspend fun setPicked(frameIds: Collection<Long>, picked: Boolean) = withContext(Dispatchers.IO) {
+        catalogue.withLock {
+            db.beginTransaction()
+            try {
+                val values = ContentValues().apply { put("picked", if (picked) 1 else 0) }
+                for (id in frameIds.distinct()) if (visibleFrame(id)) db.update("frame", values, "id=?", arrayOf(id.toString()))
+                db.setTransactionSuccessful()
+            } finally { db.endTransaction() }
+            publish()
         }
     }
 
@@ -431,6 +451,8 @@ class Library(context: Context) {
     suspend fun addPrint(frameId: Long, uri: String, width: Int, height: Int, film: String) = withContext(Dispatchers.IO) {
         catalogue.withLock {
             if (!visibleFrame(frameId)) return@withLock -1L
+            db.query("print", arrayOf("id"), "frame_id=? AND uri=?", arrayOf(frameId.toString(), uri),
+                null, null, null, "1").use { if (it.moveToFirst()) return@withLock it.getLong(0) }
             db.insert("print", null, ContentValues().apply {
                 put("frame_id", frameId); put("uri", uri); put("width", width); put("height", height)
                 put("created", System.currentTimeMillis()); put("film", film)
@@ -456,7 +478,7 @@ class Library(context: Context) {
 
     // ---- thumbnails
 
-    private fun renderThumb(small: LinearImage, look: Look, out: File, rebate: Rebate = Rebate()) {
+    private suspend fun renderThumb(small: LinearImage, look: Look, out: File, rebate: Rebate = Rebate()) {
         val rendered = picture(small, look, rebate)
         val bitmap = if (rendered.config == Bitmap.Config.ARGB_8888 &&
             rendered.colorSpace == android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB)) rendered else
@@ -475,10 +497,13 @@ class Library(context: Context) {
     }
 
     /** Persisted library previews use the full engine; workbench interaction uses a separate LUT. */
-    private fun picture(small: LinearImage, look: Look, rebate: Rebate): Bitmap {
+    private suspend fun picture(small: LinearImage, look: Look, rebate: Rebate): Bitmap {
         val base = look.photoOrder(seed = 1L)
         val order = if (rebate.idle) base else base.copy(rebate = rebate)
-        return FilmEngine.develop(small, look.photoGrade(), order, look.finish(), look.finishTable(), lane = FilmEngine.THUMB)
+        val creative = if (look.creative.active) CreativeSource(app).apply(small, look, maxOf(small.width, small.height)) else null
+        return try {
+            FilmEngine.develop(creative ?: small, look.photoGrade(), order, look.finish(), look.finishTable(), lane = FilmEngine.THUMB)
+        } finally { creative?.close() }
     }
 
     /** What [frame] puts on its negative besides the picture, with [look]. */
@@ -550,7 +575,7 @@ class Library(context: Context) {
         return db.insertOrThrow("roll", null, ContentValues().apply { put("name", name); put("created", now) })
     }
 
-    private fun insertFrame(rollId: Long, file: File, name: String, size: IntArray, metered: Float, look: Look): Long {
+    private fun insertFrame(rollId: Long, file: File, name: String, size: IntArray, metered: Float, look: Look, tethered: Boolean = false): Long {
         requireVisibleProject(rollId)
         val exif = try { ExifInterface(file) } catch (e: Exception) { null }
         val number = db.rawQuery("SELECT COALESCE(MAX(number), 0) + 1 FROM frame WHERE roll_id=?", arrayOf(rollId.toString()))
@@ -571,6 +596,7 @@ class Library(context: Context) {
             put("metered", metered.toDouble())
             put("look", look.toJson().toString())
             put("revision", 1)
+            put("tethered", if (tethered) 1 else 0)
         })
     }
 
@@ -634,7 +660,7 @@ class Library(context: Context) {
     private fun publish() {
         val frames = HashMap<Long, ArrayList<Frame>>()
         db.rawQuery(
-            "SELECT frame.id, roll_id, number, file, frame.name, raw, width, height, taken, camera, lens, iso, shutter, aperture, focal, metered, look, revision FROM frame JOIN roll ON roll.id=frame.roll_id WHERE roll.archived=0 ORDER BY roll_id, number",
+            "SELECT frame.id, roll_id, number, file, frame.name, raw, width, height, taken, camera, lens, iso, shutter, aperture, focal, metered, look, revision, picked, tethered FROM frame JOIN roll ON roll.id=frame.roll_id WHERE roll.archived=0 ORDER BY roll_id, number",
             null,
         ).use { c ->
             while (c.moveToNext()) {
@@ -646,7 +672,7 @@ class Library(context: Context) {
                     camera = c.getString(9), lens = c.getString(10), iso = c.getInt(11), shutter = c.getDouble(12),
                     aperture = c.getDouble(13), focal = c.getDouble(14), meteredEv = c.getFloat(15),
                     look = Look.fromJson(c.getString(16)),
-                    thumb = thumbFile(file, revision), revision = revision,
+                    thumb = thumbFile(file, revision), revision = revision, picked = c.getInt(18) != 0, tethered = c.getInt(19) != 0,
                 )
             }
         }
@@ -684,7 +710,7 @@ class Library(context: Context) {
         return if (ext.length in 1..5 && ext.all { it.isLetterOrDigit() }) ".$ext" else ""
     }
 
-    private class Db(context: Context) : SQLiteOpenHelper(context, "library.db", null, 2) {
+    private class Db(context: Context) : SQLiteOpenHelper(context, "library.db", null, 3) {
         override fun onConfigure(db: SQLiteDatabase) {
             db.enableWriteAheadLogging()
         }
@@ -698,7 +724,8 @@ class Library(context: Context) {
                     width INTEGER NOT NULL, height INTEGER NOT NULL, taken INTEGER NOT NULL,
                     camera TEXT NOT NULL DEFAULT '', lens TEXT NOT NULL DEFAULT '', iso INTEGER NOT NULL DEFAULT 0,
                     shutter REAL NOT NULL DEFAULT 0, aperture REAL NOT NULL DEFAULT 0, focal REAL NOT NULL DEFAULT 0,
-                    metered REAL NOT NULL DEFAULT 0, look TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1)""",
+                    metered REAL NOT NULL DEFAULT 0, look TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+                    picked INTEGER NOT NULL DEFAULT 0, tethered INTEGER NOT NULL DEFAULT 0)""",
             )
             db.execSQL("CREATE INDEX frame_roll ON frame (roll_id, number)")
             db.execSQL(
@@ -710,6 +737,10 @@ class Library(context: Context) {
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
             if (oldVersion < 2) db.execSQL("ALTER TABLE roll ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+            if (oldVersion < 3) {
+                db.execSQL("ALTER TABLE frame ADD COLUMN picked INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE frame ADD COLUMN tethered INTEGER NOT NULL DEFAULT 0")
+            }
         }
     }
 

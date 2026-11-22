@@ -15,6 +15,10 @@
 
 namespace spk {
 
+// The service can lower CPU load while the app is off screen. This changes only
+// scheduling: the same pixel loops, source resolution and precision are used.
+inline std::atomic<int> export_worker_limit{0};
+
 class ThreadPool {
 public:
     static ThreadPool& instance() {
@@ -29,7 +33,8 @@ public:
     // Nested calls from inside a job run serially (no deadlock).
     void run(int n, const std::function<void(int, int)>& job, int min_chunk = 16) {
         if (n <= 0) return;
-        const int threads = size();
+        const int limit = export_worker_limit.load(std::memory_order_relaxed);
+        const int threads = limit > 0 ? std::min(size(), limit) : size();
         if (in_job() || threads <= 1 || n < 2 * min_chunk) {
             job(0, n);
             return;

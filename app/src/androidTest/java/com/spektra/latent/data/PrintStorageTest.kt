@@ -14,7 +14,7 @@ import java.io.IOException
 import java.io.OutputStream
 import java.util.UUID
 
-/** Real atomic local files plus controlled MediaStore failures; never creates real gallery rows. */
+/** Atomic local files, controlled failures, and real MediaStore recovery. */
 @RunWith(AndroidJUnit4::class)
 class PrintStorageTest {
     private val context = ApplicationProvider.getApplicationContext<Context>()
@@ -89,6 +89,29 @@ class PrintStorageTest {
         assertFalse(saved.inGallery)
         assertTrue(gallery.deleted)
         context.contentResolver.openInputStream(saved.uri)!!.use { assertArrayEquals(payload, it.readBytes()) }
+    }
+
+    @Test fun recoveryRecognizesAnAlreadyPublishedPrintEvenAfterCancellation() = cleaning {
+        org.junit.Assume.assumeTrue(android.os.Build.VERSION.SDK_INT >= 29)
+        val key = UUID.randomUUID().toString()
+        val image = android.graphics.Bitmap.createBitmap(8, 6, android.graphics.Bitmap.Config.ARGB_8888)
+        var published: Uri? = null
+        try {
+            val saved = PrintStorage.save(context, "$prefix.jpg", "image/jpeg",
+                output = PrintStorage.Output(key, 8, 6, null)) {
+                assertTrue(image.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, it))
+            }
+            assertTrue(saved.inGallery)
+            published = saved.uri
+            val recovered = PrintStorage.recover(context, key, "image/jpeg", shouldStop = { true })!!
+            assertEquals(published, recovered.uri)
+            assertEquals(8, recovered.width)
+            assertEquals(6, recovered.height)
+        } finally {
+            image.recycle()
+            published?.let { context.contentResolver.delete(it, null, null) }
+            PrintStorage.clearCheckpoint(context, key)
+        }
     }
 
     private fun ownFiles() = directory.listFiles()?.filter { it.name.startsWith(prefix) }.orEmpty()

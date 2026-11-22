@@ -16,6 +16,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The app's name where it shows outside the app: its album in the gallery, its folders in Movies and
@@ -36,6 +37,7 @@ sealed interface Startup {
 class LatentApp : Application() {
     /** Work that belongs to the app, not to a screen: it survives leaving the screen that started it. */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    internal val printBackground = PrintBackground(this)
     internal val updates by lazy { UpdateManager(this, scope) }
 
     private val _startup = MutableStateFlow<Startup>(Startup.Loading)
@@ -72,10 +74,13 @@ class LatentApp : Application() {
             library.load()
             val recipes = Recipes(this@LatentApp)
             recipes.load()
-            _startup.value = Startup.Ready(
-                library, PrintDesk(this@LatentApp, scope, library), recipes,
-                Monitor(this@LatentApp, library, scope), LightTableStore(this@LatentApp),
-            )
+            // Create and publish Compose state on the main thread, between composition frames.
+            withContext(Dispatchers.Main) {
+                _startup.value = Startup.Ready(
+                    library, PrintDesk(this@LatentApp, scope, library, printBackground), recipes,
+                    Monitor(this@LatentApp, library, scope), LightTableStore(this@LatentApp),
+                )
+            }
             launch { library.refreshPreviews() }
             if (BuildConfig.DEBUG) importInbox(library)
         }

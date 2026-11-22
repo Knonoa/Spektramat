@@ -71,6 +71,48 @@ class LinearImage internal constructor(internal val id: Long) : AutoCloseable {
     }
 }
 
+/** Streams extra originals through a native float32 weighted exposure. */
+class ExposureComposite internal constructor(source: LinearImage, baseWeight: Float) : AutoCloseable {
+    val image: LinearImage = source.scaled(0)
+    private val weights: ByteBuffer
+    private var closed = false
+    private var detached = false
+    private var extraImages = 0
+
+    init {
+        try {
+            require(baseWeight.isFinite() && baseWeight in 0f..100f)
+            val bytes = image.width.toLong() * image.height * 4
+            require(bytes <= Int.MAX_VALUE) { "exposure is too large" }
+            weights = ByteBuffer.allocateDirect(bytes.toInt()).order(ByteOrder.nativeOrder())
+            val floats = weights.asFloatBuffer()
+            val value = baseWeight / 100f
+            for (i in 0 until floats.capacity()) floats.put(i, value)
+        } catch (failure: Throwable) { image.close(); throw failure }
+    }
+
+    fun add(layer: LinearImage, weight: Float, x: Float = 0f, y: Float = 0f, scale: Float = 1f,
+            rotation: Float = 0f, gradient: Boolean = false, angle: Float = 0f, midpoint: Float = 0f, feather: Float = .5f) {
+        check(!closed && !detached) { "exposure released" }
+        require(extraImages < 4) { "最多合成 5 张照片，包含当前底图" }
+        require(weight.isFinite() && weight in 0f..100f)
+        Native.accumulateExposure(image.id, layer.id, weights, weight / 100f,
+            x, y, scale, rotation, gradient, angle, midpoint, feather)
+        extraImages++
+    }
+
+    /** Transfers the composed image to the caller, which must close it. */
+    fun detach(): LinearImage {
+        check(!closed && !detached) { "exposure released" }
+        detached = true
+        return image
+    }
+
+    override fun close() {
+        if (!closed) { closed = true; if (!detached) image.close() }
+    }
+}
+
 /** Full precision finished pixels in the requested output space and encoding.
  * This buffer never passes through Android's F16 or 8-bit display surfaces. */
 class PhotoPixels internal constructor(private val image: LinearImage, val model: PhotoModel) : AutoCloseable {
@@ -79,6 +121,11 @@ class PhotoPixels internal constructor(private val image: LinearImage, val model
     fun pixels(): ByteBuffer = image.pixels()
     fun scaled(maxEdge: Int): PhotoPixels = PhotoPixels(
         LinearImage(Native.scaledPhoto(image.id, maxEdge, model.outputColorSpace, model.outputCctfEncoding)), model)
+
+    /** Crop and resize on finished float pixels without copying the whole native frame. */
+    fun cropScaled(x: Int, y: Int, width: Int, height: Int, outWidth: Int, outHeight: Int): PhotoPixels = PhotoPixels(
+        LinearImage(Native.cropScalePhoto(image.id, x, y, width, height, outWidth, outHeight,
+            model.outputColorSpace, model.outputCctfEncoding)), model)
 
     /** A colour-managed display/share copy, never a source for float export. */
     fun display(maxEdge: Int = 1600): Bitmap {
@@ -372,14 +419,15 @@ object FilmEngine {
         val image = LinearImage(Native.newFloatImage(bitmap.width, bitmap.height))
         try {
             val output = image.pixels().asFloatBuffer()
+            val rgb = FloatArray(3)
+            val premultiplied = bitmap.isPremultiplied
+            val stride = bitmap.rowBytes
             for (y in 0 until bitmap.height) for (x in 0 until bitmap.width) {
-                val at = y * bitmap.rowBytes + x * 4
-                val alpha = (codes[at + 3].toInt() and 255) / 255f
-                fun channel(c: Int) = if (bitmap.isPremultiplied && alpha > 0f)
-                    (codes[at + c].toInt() and 255) / (255f * alpha)
-                else (codes[at + c].toInt() and 255) / 255f
-                val rgb = converter.transform(channel(0), channel(1), channel(2))
-                output.put(rgb)
+                val at = y * stride + x * 4
+                val alpha = if (premultiplied) codes[at + 3].toInt() and 255 else 255
+                val inv = 1f / (if (alpha == 0) 255 else alpha)
+                for (c in 0..2) rgb[c] = (codes[at + c].toInt() and 255) * inv
+                output.put(converter.transform(rgb))
             }
             return image
         } catch (failure: Throwable) { image.close(); throw failure }
@@ -395,6 +443,15 @@ object FilmEngine {
             return image
         } catch (failure: Throwable) { image.close(); throw failure }
     }
+
+    /** Optional optics keep scene-linear float32 precision and extended range. */
+    fun creativeOptics(source: LinearImage, softFocus: Float, flare: Float, glow: Float): LinearImage {
+        require(listOf(softFocus, flare, glow).all { it.isFinite() && it in 0f..100f })
+        return LinearImage(Native.creativeOptics(source.id, softFocus / 100f, flare / 100f, glow / 100f))
+    }
+
+    /** Owns a copy; decoding can release each added original immediately. */
+    fun exposureComposite(source: LinearImage, baseWeight: Float = 100f) = ExposureComposite(source, baseWeight)
 
     /** Restores a disposable float32 source proxy without discarding RAW provenance. */
     fun restoreProxy(width: Int, height: Int, rgb: ByteBuffer, previewOnly: Boolean, lensOpcodes: Int): LinearImage {
@@ -507,6 +564,17 @@ object FilmEngine {
         listener: StageListener? = null,
     ): PhotoPixels {
         require(!image.previewOnly) { "无法完整解码此 RAW，不能使用内嵌预览图导出" }
+        return renderFloat(image, grade, order, finish, finishTable, PRINT, PhotoRenderMode.PHOTO_FULL, listener)
+    }
+
+    /** Keeps values above white available to the workbench before display conversion. */
+    fun proofFloat(image: LinearImage, grade: FloatArray, order: PrintOrder, finish: FloatArray, finishTable: FloatArray): PhotoPixels =
+        renderFloat(image, grade, order, finish, finishTable, PROOF, PhotoRenderMode.PHOTO_PREVIEW_FULL)
+
+    private fun renderFloat(
+        image: LinearImage, grade: FloatArray, order: PrintOrder, finish: FloatArray, finishTable: FloatArray,
+        lane: Int, mode: PhotoRenderMode, listener: StageListener? = null,
+    ): PhotoPixels {
         require(order.model.outputColorSpace in PhotoModel.outputColorSpaces)
         val size = developSize(image.width, image.height, order.rebate)
         val out = LinearImage(Native.newFloatImage(size[0], size[1]))
@@ -515,7 +583,7 @@ object FilmEngine {
             val error = Native.develop(
                 image.id, grade, order.film, order.paper, order.scanFilm, order.floats(), finish, finishTable,
                 if (idle) null else order.rebate.strings(), if (idle) null else order.rebate.numbers(),
-                PRINT, order.seed, null, listener, order.model.floats(), PhotoRenderMode.PHOTO_FULL.nativeValue,
+                lane, order.seed, null, listener, order.model.floats(), mode.nativeValue,
                 order.model.outputColorSpace, out.id,
             )
             if (error != null) throw if (error == "cancelled") DevelopCancelled() else IOException(error)
@@ -536,6 +604,8 @@ object FilmEngine {
         return Native.developSize(width, height, rebate.strings(), rebate.numbers())
             ?: throw IOException("这个片幅的片边排不出来")
     }
+
+    fun limitExportWorkers(count: Int) = Native.limitExportWorkers(count)
 
     fun cancelDevelop() = Native.cancelDevelop()
 

@@ -40,6 +40,7 @@ add_library(latent SHARED
         raw_libraw.cpp
         dng_opcodes.cpp
         basic_adjust.cpp)
+target_sources(latent PRIVATE creative_effects.cpp)
 
 target_include_directories(latent PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}

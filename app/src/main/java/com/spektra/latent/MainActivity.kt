@@ -12,6 +12,11 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.mutableStateOf
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import com.spektra.latent.ui.Ink
 import com.spektra.latent.ui.Root
 import com.spektra.latent.ui.ThemeMode
@@ -31,9 +36,26 @@ class MainActivity : ComponentActivity() {
         Ink.light = ThemeMode.saved(this).light(night)
         window.setBackgroundDrawable(ColorDrawable(if (Ink.light) 0xFFEDE7DA.toInt() else 0xFF08080A.toInt()))
         if (savedInstanceState == null) take(intent)
+        val app = application as LatentApp
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                val ready = app.startup.first { it !is Startup.Loading } as? Startup.Ready
+                if (ready?.prints?.nextWaiting() != null) app.printBackground.request()
+            }
+        }
         setContent {
             Root(app = application as LatentApp, incoming = incoming.value, onIncomingTaken = { incoming.value = emptyList() })
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        (application as LatentApp).printBackground.setActivityVisible(true)
+    }
+
+    override fun onStop() {
+        (application as LatentApp).printBackground.setActivityVisible(false)
+        super.onStop()
     }
 
     override fun onResume() {

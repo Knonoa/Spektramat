@@ -75,8 +75,10 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.spektra.latent.LatentApp
 import com.spektra.latent.data.Frame
+import com.spektra.latent.data.CreativeSource
 import com.spektra.latent.data.Decoder
 import com.spektra.latent.engine.FilmEngine
+import com.spektra.latent.model.FilmStrip
 import com.spektra.latent.model.Shooting
 import com.spektra.latent.data.Library
 import com.spektra.latent.data.LightTableStore
@@ -150,7 +152,7 @@ private class Target(val id: Long, val loupe: Boolean, val locked: Boolean, val 
  * as a picture.
  */
 @Composable
-fun TableScreen(library: Library, store: LightTableStore, onOpen: (Long) -> Unit) {
+fun TableScreen(library: Library, store: LightTableStore, onOpen: (Long) -> Unit, onStrip: (List<Long>) -> Unit) {
     val context = LocalContext.current
     val app = context.applicationContext as LatentApp
     val shell = LocalShell.current
@@ -174,6 +176,8 @@ fun TableScreen(library: Library, store: LightTableStore, onOpen: (Long) -> Unit
     }
     var ratio by remember { mutableStateOf(prefs.getString("exportRatio","free").takeIf { id->EXPORT_RATIOS.any{it.wire==id} }?:"free") }
     var snap by remember { mutableStateOf(prefs.getBoolean("snap", false)) }
+    var stripPicking by remember { mutableStateOf(false) }
+    var stripPicked by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var selectedPhoto by remember { mutableStateOf<Long?>(null) }
     var selectedLoupe by remember { mutableStateOf<Long?>(null) }
     var delta by remember { mutableStateOf<Delta?>(null) }
@@ -548,6 +552,11 @@ fun TableScreen(library: Library, store: LightTableStore, onOpen: (Long) -> Unit
             actions = {
                 history.let { IconButton(Glyph.Undo, "撤销", { step(undone, redone) }, enabled = undone.isNotEmpty()) }
                 history.let { IconButton(Glyph.Redo, "重做", { step(redone, undone) }, enabled = redone.isNotEmpty()) }
+                val ids = doc.placements.map { it.frameId }.distinct().filter(frames::containsKey)
+                if (ids.size >= 2) IconButton(Glyph.Film, "制作整卷胶片", {
+                    stripPicked = ids.takeIf { it.size <= FilmStrip.MAX_FRAMES }?.toSet() ?: emptySet()
+                    stripPicking = true
+                })
                 BarSep()
                 IconButton(Glyph.Share, if (exporting) "正在导出" else "导出", { save() }, enabled = !exporting && doc.placements.isNotEmpty())
             },
@@ -667,6 +676,27 @@ fun TableScreen(library: Library, store: LightTableStore, onOpen: (Long) -> Unit
         },
     )
     Notice(notice, { notice = null })
+
+    Sheet(stripPicking, { stripPicking = false }, title = "选片装卷", foot = {
+        Btn("制作整卷胶片 · ${stripPicked.size} 格", {
+            val chosen = stripPicked.filter(frames::containsKey)
+            if (chosen.size >= 2) { stripPicking = false; onStrip(chosen) }
+        }, Modifier.weight(1f), BtnKind.Key, enabled = stripPicked.count(frames::containsKey) in 2..FilmStrip.MAX_FRAMES)
+    }) {
+        Txt("选择台上的照片 · 最多 ${FilmStrip.MAX_FRAMES} 格", Type.micro, color = Ink.GlassDim)
+        LazyVerticalGrid(GridCells.Adaptive(88.dp), Modifier.fillMaxWidth().heightIn(max = 320.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            val available = doc.placements.map { it.frameId }.distinct().mapNotNull(frames::get)
+            items(available, key = { it.id }) { frame ->
+                val on = frame.id in stripPicked
+                Box(Modifier.aspectRatio(1f).clickable(enabled = on || stripPicked.size < FilmStrip.MAX_FRAMES) {
+                    stripPicked = if (on) stripPicked - frame.id else stripPicked + frame.id
+                }.border(2.dp, if (on) Ink.Amber else Color.Transparent)) {
+                    FileImage(frame.thumb, Modifier.fillMaxSize().padding(2.dp))
+                }
+            }
+        }
+    }
 
     // ---- choosing photographs from the library
     Sheet(
@@ -808,7 +838,9 @@ private suspend fun export(
                 val frame = frames[id] ?: throw IOException("版面中的照片已从片库移除")
                 val look = frame.look
                 // Composition is also an export: render the native original before resizing for its place on the sheet.
-                val bitmap = Decoder.decode(frame.file, 0, look.lensShading, look.aspect).use { original ->
+                val decoded = Decoder.decode(frame.file, 0, look.lensShading, look.aspect)
+                val prepared = if (look.creative.active) decoded.use { CreativeSource(context).apply(it, look, 0) } else decoded
+                val bitmap = prepared.use { original ->
                     FilmEngine.developFloat(original, look.photoGrade(),
                         look.photoOrder(frame.id * 7919L + 1L, Shooting.of(frame), Library.frameSeed(frame), frame.number),
                         look.finish(), look.finishTable()).use { print -> print.display(edge) }

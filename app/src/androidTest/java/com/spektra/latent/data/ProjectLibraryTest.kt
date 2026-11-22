@@ -57,6 +57,25 @@ class ProjectLibraryTest {
         if (::sandbox.isInitialized) sandbox.deleteRecursively()
     }
 
+    @Test fun importingHeicAndMotionPhotoPreservesTheEmbeddedOriginal() = runBlocking {
+        assumeTrue(android.os.Build.VERSION.SDK_INT >= 34)
+        val assets = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().context.assets
+        for (name in listOf("sdr.heic", "motion.heic", "motion.jpg", "10bit.heic")) {
+            val file = File(sandbox, name)
+            assets.open("phone-formats/$name").use { file.writeBytes(it.readBytes()) }
+            val report = library.import(listOf(Uri.fromFile(file)))
+            if (name == "10bit.heic") {
+                assertTrue(report.added.isEmpty())
+                assertTrue(report.failed.single().contains(PhoneImageFormat.PRECISION_ERROR))
+            } else {
+                val frame = library.frame(report.added.single())!!
+                assertArrayEquals(file.readBytes(), frame.file.readBytes())
+                assertTrue(frame.thumb.length() > 0)
+                assertEquals(name.startsWith("motion"), MotionPhoto.read(frame.file) != null)
+            }
+        }
+    }
+
     @Test fun removingAProjectFromTheAppPersistsButPreservesEveryOriginalByte() = runBlocking {
         val project = library.createProject("仅从应用移除")
         val source = source("keep-original.png", 1)
